@@ -1,5 +1,9 @@
 repos:
--   repo: https://github.com/psf/black
-    rev: stable
+-   repo: local
     hooks:
-    -   id: black 
+      - id: run-pytest
+        name: Run pytest before commit
+        entry: pytest
+        language: system  # use system python environment
+        types: [python]
+        pass_filenames: false  # run on the full project, not just staged files
