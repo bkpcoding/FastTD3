@@ -416,6 +416,9 @@ class EmpiricalNormalization(nn.Module):
         # Update count
         new_count = self.count + batch_size
 
+        # Save old mean for variance calculation
+        old_mean = self._mean.clone()
+
         # Update mean
         delta = batch_mean - self._mean
         self._mean += (batch_size / new_count) * delta
@@ -426,7 +429,7 @@ class EmpiricalNormalization(nn.Module):
             batch_var = torch.mean((x - batch_mean) ** 2, dim=0, keepdim=True)
 
             # Combine variances using parallel algorithm
-            delta2 = batch_mean - self._mean
+            delta2 = batch_mean - old_mean  # Use old mean, not new mean
             m_a = self._var * self.count
             m_b = batch_var * batch_size
             M2 = m_a + m_b + (delta2**2) * (self.count * batch_size / new_count)

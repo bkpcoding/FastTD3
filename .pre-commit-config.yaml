@@ -3,7 +3,7 @@ repos:
     hooks:
       - id: run-pytest
         name: Run pytest before commit
-        entry: pytest
-        language: system  # use system python environment
+        entry: /scratch/bucherb_root/bucherb0/shared_data/envs/fasttd3_mjp/bin/python -m pytest tests/
+        language: system
         types: [python]
-        pass_filenames: false  # run on the full project, not just staged files
+        pass_filenames: false
