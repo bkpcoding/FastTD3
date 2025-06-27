@@ -89,3 +89,23 @@ def test_compute_advantages_zero_std():
 
     assert buffer.advantages.shape == (1 + 2,)
     assert torch.allclose(buffer.advantages, expected_advantages, atol=1e-7)
+
+def test_add_episode_return_calculation():
+    """Test the discounted return calculation in the add_episode method."""
+    buffer = GroupRolloutBuffer(group_size=1, device='cpu')
+    gamma = 0.99
+    rewards = [1.0, 2.0, 3.0]
+    
+    # Expected return
+    expected_return = 1.0 + 0.99 * (2.0 + 0.99 * 3.0)
+
+    buffer.add_episode(
+        [torch.randn(1)] * 3,
+        [torch.randn(1)] * 3,
+        [torch.tensor(-0.1)] * 3,
+        rewards,
+        gamma
+    )
+
+    assert len(buffer.episodes) == 1
+    assert torch.isclose(buffer.episodes[0]['return'], torch.tensor(expected_return))
