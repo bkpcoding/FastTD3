@@ -15,15 +15,42 @@ class GroupRolloutBuffer:
         return len(self.episodes)
 
     def add_episode(self, obs, actions, logprobs, rewards, gamma):
-        # obs, actions, logprobs, rewards are lists of tensors
-        R = 0.0
-        for r in reversed(rewards):
-            R = r + gamma * R
+        """Add a single episode to the buffer.
+
+        Parameters
+        ----------
+        obs, actions, logprobs, rewards : list[Tensor] or Tensor
+            Episode data collected from one environment. Each input can be
+            provided either as a list of tensors (one per step) or already
+            stacked into a tensor of shape ``(T, *)``.
+        gamma : float
+            Discount factor used to compute the episode return.
+        """
+
+        # Convert lists to tensors if necessary. This also allows passing
+        # pre-stacked tensors for minor speed benefits when episodes are
+        # constructed in a vectorised manner.
+        obs = torch.stack(obs) if isinstance(obs, list) else obs
+        actions = torch.stack(actions) if isinstance(actions, list) else actions
+        logprobs = (
+            torch.stack(logprobs) if isinstance(logprobs, list) else logprobs
+        )
+        rewards = torch.tensor(rewards) if isinstance(rewards, list) else rewards
+
+        # Vectorised discounted return computation.
+        # Create discount factors: [gamma^0, gamma^1, gamma^2, ..., gamma^(T-1)]
+        T = rewards.shape[0]
+        discount_powers = torch.arange(T, device=self.device, dtype=torch.float32)
+        discount_factors = torch.pow(gamma, discount_powers)
+        
+        # Compute discounted return by reversing rewards, applying discounts, and summing
+        R = (rewards * discount_factors).sum()
+
         self.episodes.append(
             {
-                "obs": torch.stack(obs),
-                "actions": torch.stack(actions),
-                "logprobs": torch.stack(logprobs),
+                "obs": obs,
+                "actions": actions,
+                "logprobs": logprobs,
                 "return": torch.as_tensor(R, device=self.device, dtype=torch.float32),
             }
         )
