@@ -1,5 +1,9 @@
 repos:
--   repo: https://github.com/psf/black
-    rev: stable
+-   repo: local
     hooks:
-    -   id: black 
+      - id: run-pytest
+        name: Run pytest before commit
+        entry: /scratch/bucherb_root/bucherb0/shared_data/envs/fasttd3_mjp/bin/python -m pytest tests/
+        language: system
+        types: [python]
+        pass_filenames: false

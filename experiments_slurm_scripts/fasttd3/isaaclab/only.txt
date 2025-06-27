@@ -1,0 +1,69 @@
+/home/bpatil/.local/lib/python3.10/site-packages/tyro/_parsers.py:347: UserWarning: The field `checkpoint-path` is annotated with type `<class 'str'>`, but the default value `None` has type `<class 'NoneType'>`. We'll try to handle this gracefully, but it may cause unexpected behavior.
+  warnings.warn(message)
+/home/bpatil/.local/lib/python3.10/site-packages/tyro/_parsers.py:347: UserWarning: The field `output-dir` is annotated with type `<class 'str'>`, but the default value `None` has type `<class 'NoneType'>`. We'll try to handle this gracefully, but it may cause unexpected behavior.
+  warnings.warn(message)
+wandb: Currently logged in as: sagar8. Use `wandb login --relogin` to force relogin
+wandb: wandb version 0.20.1 is available!  To upgrade, please run:
+wandb:  $ pip install wandb --upgrade
+wandb: Tracking run with wandb version 0.12.21
+wandb: Run data is saved locally in /nfs/turbo/coe-mandmlab/bpatil/projects/FastTD3/experiments_slurm_scripts/fasttd3/isaaclab/wandb/run-20250625_131440-hsewhqxf
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run Isaac-Velocity-Flat-G1-v0__Isaac-Velocity-Flat-G1-v0__0
+wandb: ⭐️ View project at https://wandb.ai/sagar8/rl_scratch
+wandb: 🚀 View run at https://wandb.ai/sagar8/rl_scratch/runs/hsewhqxf
+Traceback (most recent call last):
+  File "/nfs/turbo/coe-mandmlab/bpatil/projects/FastTD3/fast_td3/train.py", line 615, in <module>
+    main()
+  File "/nfs/turbo/coe-mandmlab/bpatil/projects/FastTD3/fast_td3/train.py", line 94, in main
+    envs = IsaacLabEnv(
+  File "/nfs/turbo/coe-mandmlab/bpatil/projects/FastTD3/fast_td3/environments/isaaclab_env.py", line 32, in __init__
+    self.envs = gym.make(task_name, cfg=env_cfg, render_mode=None)
+  File "/isaac-sim/kit/python/lib/python3.10/site-packages/gymnasium/envs/registration.py", line 742, in make
+    env = env_creator(**env_spec_kwargs)
+  File "/workspace/isaaclab/source/isaaclab/isaaclab/envs/manager_based_rl_env.py", line 82, in __init__
+    super().__init__(cfg=cfg)
+  File "/workspace/isaaclab/source/isaaclab/isaaclab/envs/manager_based_env.py", line 130, in __init__
+    self.scene = InteractiveScene(self.cfg.scene)
+  File "/workspace/isaaclab/source/isaaclab/isaaclab/scene/interactive_scene.py", line 152, in __init__
+    self._add_entities_from_cfg()
+  File "/workspace/isaaclab/source/isaaclab/isaaclab/scene/interactive_scene.py", line 658, in _add_entities_from_cfg
+    self._articulations[asset_name] = asset_cfg.class_type(asset_cfg)
+  File "/workspace/isaaclab/source/isaaclab/isaaclab/assets/articulation/articulation.py", line 100, in __init__
+    super().__init__(cfg)
+  File "/workspace/isaaclab/source/isaaclab/isaaclab/assets/asset_base.py", line 81, in __init__
+    self.cfg.spawn.func(
+  File "/workspace/isaaclab/source/isaaclab/isaaclab/sim/utils.py", line 251, in wrapper
+    prim = func(prim_paths[0], cfg, *args, **kwargs)
+  File "/workspace/isaaclab/source/isaaclab/isaaclab/sim/spawners/from_files/from_files.py", line 66, in spawn_from_usd
+    return _spawn_from_usd_file(prim_path, cfg.usd_path, cfg, translation, orientation)
+  File "/workspace/isaaclab/source/isaaclab/isaaclab/sim/spawners/from_files/from_files.py", line 237, in _spawn_from_usd_file
+    raise FileNotFoundError(f"USD file not found at path: '{usd_path}'.")
+FileNotFoundError: USD file not found at path: 'http://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/4.5/Isaac/IsaacLab/Robots/Unitree/G1/g1_minimal.usd'.
+Traceback (most recent call last):
+  File "/nfs/turbo/coe-mandmlab/bpatil/projects/FastTD3/fast_td3/train.py", line 615, in <module>
+    main()
+  File "/nfs/turbo/coe-mandmlab/bpatil/projects/FastTD3/fast_td3/train.py", line 94, in main
+    envs = IsaacLabEnv(
+  File "/nfs/turbo/coe-mandmlab/bpatil/projects/FastTD3/fast_td3/environments/isaaclab_env.py", line 32, in __init__
+    self.envs = gym.make(task_name, cfg=env_cfg, render_mode=None)
+  File "/isaac-sim/kit/python/lib/python3.10/site-packages/gymnasium/envs/registration.py", line 742, in make
+    env = env_creator(**env_spec_kwargs)
+  File "/workspace/isaaclab/source/isaaclab/isaaclab/envs/manager_based_rl_env.py", line 82, in __init__
+    super().__init__(cfg=cfg)
+  File "/workspace/isaaclab/source/isaaclab/isaaclab/envs/manager_based_env.py", line 130, in __init__
+    self.scene = InteractiveScene(self.cfg.scene)
+  File "/workspace/isaaclab/source/isaaclab/isaaclab/scene/interactive_scene.py", line 152, in __init__
+    self._add_entities_from_cfg()
+  File "/workspace/isaaclab/source/isaaclab/isaaclab/scene/interactive_scene.py", line 658, in _add_entities_from_cfg
+    self._articulations[asset_name] = asset_cfg.class_type(asset_cfg)
+  File "/workspace/isaaclab/source/isaaclab/isaaclab/assets/articulation/articulation.py", line 100, in __init__
+    super().__init__(cfg)
+  File "/workspace/isaaclab/source/isaaclab/isaaclab/assets/asset_base.py", line 81, in __init__
+    self.cfg.spawn.func(
+  File "/workspace/isaaclab/source/isaaclab/isaaclab/sim/utils.py", line 251, in wrapper
+    prim = func(prim_paths[0], cfg, *args, **kwargs)
+  File "/workspace/isaaclab/source/isaaclab/isaaclab/sim/spawners/from_files/from_files.py", line 66, in spawn_from_usd
+    return _spawn_from_usd_file(prim_path, cfg.usd_path, cfg, translation, orientation)
+  File "/workspace/isaaclab/source/isaaclab/isaaclab/sim/spawners/from_files/from_files.py", line 237, in _spawn_from_usd_file
+    raise FileNotFoundError(f"USD file not found at path: '{usd_path}'.")
+FileNotFoundError: USD file not found at path: 'http://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/4.5/Isaac/IsaacLab/Robots/Unitree/G1/g1_minimal.usd'.
