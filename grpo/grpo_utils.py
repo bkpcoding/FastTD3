@@ -35,7 +35,7 @@ class GroupRolloutBuffer:
         logprobs = (
             torch.stack(logprobs) if isinstance(logprobs, list) else logprobs
         )
-        rewards = torch.tensor(rewards) if isinstance(rewards, list) else rewards
+        rewards = torch.tensor(rewards, device=self.device) if isinstance(rewards, list) else rewards
 
         # Vectorised discounted return computation.
         # Create discount factors: [gamma^0, gamma^1, gamma^2, ..., gamma^(T-1)]
