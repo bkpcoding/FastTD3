@@ -136,9 +136,27 @@ def main():
         normalizer.train()
         return episode_returns.mean().item(), episode_lengths.mean().item()
 
-    episodes_data = [
-        dict(obs=[], actions=[], logps=[], rewards=[]) for _ in range(args.num_envs)
-    ]
+    # Vectorized episode data storage
+    max_episode_length = getattr(envs, 'max_episode_length', getattr(envs, 'max_episode_steps', 1000))
+    
+    # Check for single observation space in case of heterogeneous envs
+    if isinstance(n_obs, (list, tuple)):
+        if len(n_obs) > 1:
+            print("Warning: Heterogeneous observation spaces detected. Using the first one.")
+        n_obs = n_obs[0]
+
+    # Check for single action space
+    if isinstance(n_act, (list, tuple)):
+        if len(n_act) > 1:
+            print("Warning: Heterogeneous action spaces detected. Using the first one.")
+        n_act = n_act[0]
+
+    obs_buf = torch.zeros((max_episode_length, args.num_envs, n_obs), dtype=torch.float32, device=device)
+    actions_buf = torch.zeros((max_episode_length, args.num_envs, n_act), dtype=torch.float32, device=device)
+    logps_buf = torch.zeros((max_episode_length, args.num_envs), dtype=torch.float32, device=device)
+    rewards_buf = torch.zeros((max_episode_length, args.num_envs), dtype=torch.float32, device=device)
+    episode_step_counter = torch.zeros(args.num_envs, dtype=torch.long, device=device)
+    env_indices = torch.arange(args.num_envs, device=device)
 
     print("Starting training loop...")
     pbar = tqdm(total=args.total_timesteps, desc="Training Progress", unit="steps")
@@ -171,32 +189,48 @@ def main():
         ):
             norm_obs = normalizer(obs)
             action, logp = actor.act(norm_obs)
+        
         next_obs, reward, done, _ = envs.step(action)
-        for i in range(args.num_envs):
-            episodes_data[i]["obs"].append(obs[i].to(device))
-            episodes_data[i]["actions"].append(action[i].to(device))
-            episodes_data[i]["logps"].append(logp[i].to(device))
-            episodes_data[i]["rewards"].append(reward[i].to(device))
+
+        # Add data to buffers
+        obs_buf[episode_step_counter, env_indices] = obs
+        actions_buf[episode_step_counter, env_indices] = action
+        logps_buf[episode_step_counter, env_indices] = logp
+        rewards_buf[episode_step_counter, env_indices] = reward.to(device)
+        episode_step_counter += 1
+        
         global_step += args.num_envs
         pbar.update(args.num_envs)
         
         # Track episode completions
-        for i in range(args.num_envs):
-            if done[i]:
-                episode_reward = sum(episodes_data[i]["rewards"]).item()
-                episode_length = len(episodes_data[i]["rewards"])
+        done_indices = torch.where(done)[0]
+        if len(done_indices) > 0:
+            for i in done_indices:
+                ep_len = episode_step_counter[i].item()
+                
+                # Extract episode data
+                ep_obs = obs_buf[:ep_len, i]
+                ep_actions = actions_buf[:ep_len, i]
+                ep_logps = logps_buf[:ep_len, i]
+                ep_rewards = rewards_buf[:ep_len, i]
+                
+                episode_reward = ep_rewards.sum().item()
+                episode_length = ep_len
                 episode_rewards.append(episode_reward)
                 episode_lengths.append(episode_length)
                 num_episodes += 1
                 
                 buffer.add_episode(
-                    episodes_data[i]["obs"],
-                    episodes_data[i]["actions"],
-                    episodes_data[i]["logps"],
-                    episodes_data[i]["rewards"],
+                    ep_obs,
+                    ep_actions,
+                    ep_logps,
+                    ep_rewards,
                     args.gamma,
                 )
-                episodes_data[i] = dict(obs=[], actions=[], logps=[], rewards=[])
+            
+            # Reset counters for done episodes
+            episode_step_counter[done_indices] = 0
+        
         obs = next_obs
         
         # Update progress bar with current metrics
@@ -324,7 +358,7 @@ def main():
 
                 # Add network parameter norms
                 actor_norms = calculate_network_norms(actor, "actor")
-                logs_dict.update(actor_norms)
+                logs_dict.update(actor_norms);
 
                 # Add evaluation metrics if available
                 if eval_avg_return is not None:
