@@ -2,6 +2,7 @@ import os
 from dataclasses import dataclass
 import tyro
 
+
 @dataclass
 class BaseArgs:
     """Default hyperparameters for PPO training."""
@@ -22,7 +23,7 @@ class BaseArgs:
     """Lambda for GAE."""
     clip_eps: float = 0.2
     """Clipping range for the policy loss."""
-    ent_coef: float = 0.0
+    ent_coef: float = 0.01
     """Entropy regularization coefficient."""
     vf_coef: float = 0.5
     """Value function loss coefficient."""
