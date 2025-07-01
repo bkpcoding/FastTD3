@@ -13,7 +13,7 @@ class BaseArgs:
     """Type of the environment. Currently only MuJoCo Playground is supported."""
     total_timesteps: int = 200000000
     """Total timesteps to train for."""
-    num_envs: int = 1024
+    num_envs: int = 2048
     """Number of parallel environments."""
     learning_rate: float = 3e-4
     """Learning rate for the optimizer."""
@@ -31,13 +31,13 @@ class BaseArgs:
     """Number of optimization epochs per update."""
     batch_size: int = 512
     """Mini-batch size."""
-    rollout_length: int = 256
+    rollout_length: int = 64
     """Number of steps to collect before each update."""
     hidden_dim: int = 256
     """Hidden dimension of policy and value networks."""
-    log_interval: int = 1000
+    log_interval: int = 10000
     """Interval (in steps) between logging to stdout."""
-    eval_interval: int = 10000
+    eval_interval: int = 100000
     """Evaluation interval in environment steps."""
     num_eval_envs: int = 10
     """Number of parallel evaluation environments."""
@@ -55,7 +55,7 @@ class BaseArgs:
     """Directory to store checkpoints and logs."""
     save_interval: int = 0
     """How often to save model checkpoints. If 0, disabled."""
-    compile: bool = False
+    compile: bool = True
     """Use torch.compile on key functions."""
     amp: bool = False
     """Enable automatic mixed precision."""

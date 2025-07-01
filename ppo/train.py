@@ -107,11 +107,14 @@ def main():
         policy_value = torch.compile(policy.value)
         policy_get_dist = torch.compile(policy.get_dist)
         normalize_obs = torch.compile(normalizer.forward)
+        # Keep non-compiled version for evaluation to avoid FX tracing conflicts
+        eval_normalize_obs = normalizer.forward
     else:
         policy_act = policy.act
         policy_value = policy.value
         policy_get_dist = policy.get_dist
         normalize_obs = normalizer.forward
+        eval_normalize_obs = normalizer.forward
 
     buffer = RolloutBuffer(
         args.rollout_length, args.num_envs, n_obs, n_act, device=device
@@ -136,6 +139,10 @@ def main():
     # Evaluation metrics
     eval_returns = []
     eval_lengths = []
+    last_eval_step = (
+        -args.eval_interval
+    )  # Initialize to trigger first evaluation at step 0
+    last_save_step = -args.save_interval  # Initialize to trigger first save if needed
 
     def evaluate():
         """Evaluate the current policy on separate evaluation environments."""
@@ -157,7 +164,7 @@ def main():
             with torch.no_grad(), autocast(
                 device_type=amp_device_type, dtype=amp_dtype, enabled=amp_enabled
             ):
-                norm_obs = normalize_obs(obs)
+                norm_obs = eval_normalize_obs(obs)
                 action, _, _ = policy_act(norm_obs)
 
             next_obs, rewards, dones, _ = eval_envs.step(action)
@@ -195,7 +202,7 @@ def main():
             with torch.no_grad(), autocast(
                 device_type=amp_device_type, dtype=amp_dtype, enabled=amp_enabled
             ):
-                norm_obs = normalize_obs(obs)
+                norm_obs = eval_normalize_obs(obs)
                 action, _, _ = policy_act(norm_obs)
             next_obs, _, done, _ = render_env.step(action)
             if env_type == "mujoco_playground":
@@ -226,11 +233,15 @@ def main():
             # Evaluation phase - run before data collection
             eval_avg_return = None
             eval_avg_length = None
-            if args.eval_interval > 0 and global_step % args.eval_interval == 0:
+            if (
+                args.eval_interval > 0
+                and global_step - last_eval_step >= args.eval_interval
+            ):
                 print(f"\nEvaluating at global step {global_step}")
                 eval_avg_return, eval_avg_length = evaluate()
                 eval_returns.append(eval_avg_return)
                 eval_lengths.append(eval_avg_length)
+                last_eval_step = global_step  # Update last evaluation step
                 print(
                     f"*** Evaluation - Avg Return: {eval_avg_return:.3f}, Avg Length: {eval_avg_length:.1f}****"
                 )
@@ -465,9 +476,10 @@ def main():
             if (
                 args.save_interval > 0
                 and global_step > 0
-                and global_step % args.save_interval == 0
+                and global_step - last_save_step >= args.save_interval
             ):
                 print(f"Saving model at global step {global_step}")
+                last_save_step = global_step  # Update last save step
                 save_ppo_params(
                     global_step,
                     policy,
