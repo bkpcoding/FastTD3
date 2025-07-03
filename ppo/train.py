@@ -15,6 +15,7 @@ from fast_td3.environments.mujoco_playground_env import make_env
 from fast_td3.fast_td3_utils import EmpiricalNormalization
 from .ppo import ActorCritic, calculate_network_norms
 from .ppo_utils import RolloutBuffer, save_ppo_params
+from .spatial_coverage import SpatialCoverageMetric
 from tensordict import TensorDict
 
 import os
@@ -118,6 +119,16 @@ def main():
 
     buffer = RolloutBuffer(
         args.rollout_length, args.num_envs, n_obs, n_act, device=device
+    )
+
+    # Initialize spatial coverage metric
+    coverage_metric = SpatialCoverageMetric(
+        grid_size=32,
+        n_neighbors=15,
+        min_dist=0.1,
+        random_state=args.seed,
+        buffer_size=10000,
+        device=device
     )
 
     # Progress tracking variables
@@ -330,6 +341,8 @@ def main():
                 for b_obs, b_actions, b_logp, b_returns, b_adv in buffer.get_batches(
                     args.batch_size
                 ):
+                    # Add batch observations to coverage metric
+                    coverage_metric.add_batch_data(b_obs)
                     with autocast(
                         device_type=amp_device_type,
                         dtype=amp_dtype,
@@ -380,6 +393,9 @@ def main():
                     epoch_updates += 1
 
             update_time = time.time() - update_start_time
+
+            # Update coverage metric after each policy update
+            current_coverage = coverage_metric.update_coverage()
 
             # Update global metrics (average across batches, not accumulate)
             total_policy_loss += epoch_policy_loss / epoch_updates
@@ -437,6 +453,7 @@ def main():
             print(
                 f"Loss Stats: Policy: {avg_policy_loss:.6f} | Value: {avg_value_loss:.6f} | Entropy: {avg_entropy:.6f}"
             )
+            print(f"Coverage: {current_coverage:.4f} | Occupied Cells: {len(coverage_metric.occupied_cells)}/{coverage_metric.grid_size**2}")
             print(f"Timing: Rollout: {rollout_time:.3f}s | Update: {update_time:.3f}s")
             print(f"Epoch {epoch+1}/{args.update_epochs} | Updates: {epoch_updates}")
 
@@ -461,6 +478,8 @@ def main():
                 logs_dict["grad_norm"] = (
                     grad_norm.item() if "grad_norm" in locals() else 0.0
                 )
+                logs_dict["spatial_coverage"] = current_coverage
+                logs_dict["occupied_cells"] = len(coverage_metric.occupied_cells)
 
                 policy_norms = calculate_network_norms(policy, "policy")
                 logs_dict.update(policy_norms)
@@ -501,17 +520,73 @@ def main():
         print(f"Final evaluation return: {eval_returns[-1]:.3f}")
         print(f"Best evaluation return: {max(eval_returns):.3f}")
 
+    # Print final spatial coverage results
+    final_coverage = coverage_metric.get_current_coverage()
+    coverage_summary = coverage_metric.get_summary()
+    print(f"\n{'='*60}")
+    print(f"FINAL SPATIAL COVERAGE METRICS")
+    print(f"{'='*60}")
+    print(f"Final Coverage: {final_coverage:.4f}")
+    print(f"Total Grid Cells: {coverage_summary['total_cells']}")
+    print(f"Occupied Cells: {coverage_summary['occupied_cells']}")
+    print(f"Data Points Processed: {coverage_summary['data_points']}")
+    print(f"Grid Size: {coverage_summary['grid_size']}x{coverage_summary['grid_size']}")
+    if 'max_coverage' in coverage_summary:
+        print(f"Maximum Coverage Achieved: {coverage_summary['max_coverage']:.4f}")
+        print(f"Coverage Growth: {coverage_summary['coverage_growth']:.4f}")
+    print(f"{'='*60}")
+
+    # Generate final visualization
+    try:
+        output_dir = args.output_dir
+        coverage_viz_path = f"{output_dir}/{run_name}_spatial_coverage_final.png"
+        
+        print(f"Generating spatial coverage visualization: {coverage_viz_path}")
+        fig = coverage_metric.visualize_coverage(
+            title=f"Final Spatial Coverage - {run_name}",
+            save_path=coverage_viz_path
+        )
+        if fig is not None:
+            import matplotlib
+            matplotlib.pyplot.close(fig)  # Close to free memory
+            print(f"Spatial coverage visualization saved to: {coverage_viz_path}")
+        else:
+            print("Warning: Could not generate spatial coverage visualization")
+    except Exception as e:
+        print(f"Warning: Failed to generate coverage visualization: {e}")
+
+    # Save final coverage data with num_envs in filename
+    try:
+        coverage_save_path = f"{args.output_dir}/{run_name}"
+        coverage_metric.save_final_coverage(coverage_save_path, args.num_envs)
+    except Exception as e:
+        print(f"Warning: Failed to save final coverage data: {e}")
+
     # Log final results to wandb
     if args.use_wandb:
-        wandb.log(
-            {
-                "final_eval_return": eval_returns[-1] if eval_returns else 0,
-                "best_eval_return": max(eval_returns) if eval_returns else 0,
-                "total_training_time": total_time,
-                "final_fps": global_step / total_time,
-            },
-            step=global_step,
-        )
+        final_logs = {
+            "final_eval_return": eval_returns[-1] if eval_returns else 0,
+            "best_eval_return": max(eval_returns) if eval_returns else 0,
+            "total_training_time": total_time,
+            "final_fps": global_step / total_time,
+            "final_spatial_coverage": final_coverage,
+            "final_occupied_cells": coverage_summary['occupied_cells'],
+            "final_data_points": coverage_summary['data_points'],
+        }
+        
+        if 'max_coverage' in coverage_summary:
+            final_logs["max_spatial_coverage"] = coverage_summary['max_coverage']
+            final_logs["coverage_growth"] = coverage_summary['coverage_growth']
+            
+        wandb.log(final_logs, step=global_step)
+        
+        # Upload coverage visualization if it exists
+        try:
+            if 'coverage_viz_path' in locals() and os.path.exists(coverage_viz_path):
+                wandb.log({"spatial_coverage_final_plot": wandb.Image(coverage_viz_path)}, step=global_step)
+        except Exception as e:
+            print(f"Warning: Failed to upload coverage visualization to wandb: {e}")
+            
         wandb.finish()
 
     save_ppo_params(
