@@ -28,7 +28,7 @@ class BaseArgs:
     """the path to the checkpoint file"""
     output_dir: str = None
     """the path to the output directory"""
-    num_envs: int = 128  # 48 on 6 core cpu (for humanoid bench, mjx doesn't require cpu)
+    num_envs: int = 16  # 48 on 6 core cpu (for humanoid bench, mjx doesn't require cpu)
     """the number of environments to run in parallel"""
     num_eval_envs: int = 128
     """the number of evaluation environments to run in parallel (only valid for MuJoCo Playground)"""
