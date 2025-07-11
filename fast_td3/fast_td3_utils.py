@@ -1,7 +1,10 @@
 import os
 
+from typing import Optional
+
 import torch
 import torch.nn as nn
+import torch.distributed as dist
 
 from tensordict import TensorDict
 
@@ -27,6 +30,8 @@ class SimpleReplayBuffer(nn.Module):
         When playground_mode=True, critic_observations are treated as a concatenation of
         regular observations and privileged observations, and only the privileged part is stored
         to save memory.
+
+        TODO (Younggyo): Refactor to split this into SimpleReplayBuffer and NStepReplayBuffer
         """
         super().__init__()
 
@@ -81,6 +86,7 @@ class SimpleReplayBuffer(nn.Module):
                 )
         self.ptr = 0
 
+    @torch.no_grad()
     def extend(
         self,
         tensor_dict: TensorDict,
@@ -115,6 +121,7 @@ class SimpleReplayBuffer(nn.Module):
                 self.next_critic_observations[:, ptr] = next_critic_observations
         self.ptr += 1
 
+    @torch.no_grad()
     def sample(self, batch_size: int):
         # we will sample n_env * batch_size transitions
 
@@ -146,6 +153,7 @@ class SimpleReplayBuffer(nn.Module):
             truncations = torch.gather(self.truncations, 1, indices).reshape(
                 self.n_env * batch_size
             )
+            effective_n_steps = torch.ones_like(dones)
             if self.asymmetric_obs:
                 if self.playground_mode:
                     # Gather privileged observations
@@ -179,12 +187,31 @@ class SimpleReplayBuffer(nn.Module):
                     ).reshape(self.n_env * batch_size, self.n_critic_obs)
         else:
             # Sample base indices
-            indices = torch.randint(
-                0,
-                min(self.buffer_size, self.ptr),
-                (self.n_env, batch_size),
-                device=self.device,
-            )
+            if self.ptr >= self.buffer_size:
+                # When the buffer is full, there is no protection against sampling across different episodes
+                # We avoid this by temporarily setting self.pos - 1 to truncated = True if not done
+                # https://github.com/DLR-RM/stable-baselines3/blob/b91050ca94f8bce7a0285c91f85da518d5a26223/stable_baselines3/common/buffers.py#L857-L860
+                # TODO (Younggyo): Change the reference when this SB3 branch is merged
+                current_pos = self.ptr % self.buffer_size
+                curr_truncations = self.truncations[:, current_pos - 1].clone()
+                self.truncations[:, current_pos - 1] = torch.logical_not(
+                    self.dones[:, current_pos - 1]
+                )
+                indices = torch.randint(
+                    0,
+                    self.buffer_size,
+                    (self.n_env, batch_size),
+                    device=self.device,
+                )
+            else:
+                # Buffer not full - ensure n-step sequence doesn't exceed valid data
+                max_start_idx = max(1, self.ptr - self.n_steps + 1)
+                indices = torch.randint(
+                    0,
+                    max_start_idx,
+                    (self.n_env, batch_size),
+                    device=self.device,
+                )
             obs_indices = indices.unsqueeze(-1).expand(-1, -1, self.n_obs)
             act_indices = indices.unsqueeze(-1).expand(-1, -1, self.n_act)
 
@@ -239,11 +266,15 @@ class SimpleReplayBuffer(nn.Module):
                 all_indices,
             )
 
-            # Create masks for rewards after first done
+            # Create masks for rewards *after* first done
             # This creates a cumulative product that zeroes out rewards after the first done
+            all_dones_shifted = torch.cat(
+                [torch.zeros_like(all_dones[:, :, :1]), all_dones[:, :, :-1]], dim=2
+            )  # First reward should not be masked
             done_masks = torch.cumprod(
-                1.0 - all_dones, dim=2
+                1.0 - all_dones_shifted, dim=2
             )  # [n_env, batch_size, n_step]
+            effective_n_steps = done_masks.sum(2)
 
             # Create discount factors
             discounts = torch.pow(
@@ -339,6 +370,7 @@ class SimpleReplayBuffer(nn.Module):
             rewards = n_step_rewards.reshape(self.n_env * batch_size)
             dones = final_dones.reshape(self.n_env * batch_size)
             truncations = final_truncations.reshape(self.n_env * batch_size)
+            effective_n_steps = effective_n_steps.reshape(self.n_env * batch_size)
             next_observations = final_next_observations.reshape(
                 self.n_env * batch_size, self.n_obs
             )
@@ -352,6 +384,7 @@ class SimpleReplayBuffer(nn.Module):
                     "dones": dones,
                     "truncations": truncations,
                     "observations": next_observations,
+                    "effective_n_steps": effective_n_steps,
                 },
             },
             batch_size=self.n_env * batch_size,
@@ -359,6 +392,10 @@ class SimpleReplayBuffer(nn.Module):
         if self.asymmetric_obs:
             out["critic_observations"] = critic_observations
             out["next"]["critic_observations"] = next_critic_observations
+
+        if self.n_steps > 1 and self.ptr >= self.buffer_size:
+            # Roll back the truncation flags introduced for safe sampling
+            self.truncations[:, current_pos - 1] = curr_truncations
         return out
 
 
@@ -391,13 +428,16 @@ class EmpiricalNormalization(nn.Module):
     def std(self):
         return self._std.squeeze(0).clone()
 
-    def forward(self, x: torch.Tensor, center: bool = True) -> torch.Tensor:
+    @torch.no_grad()
+    def forward(
+        self, x: torch.Tensor, center: bool = True, update: bool = True
+    ) -> torch.Tensor:
         if x.shape[1:] != self._mean.shape[1:]:
             raise ValueError(
                 f"Expected input of shape (*,{self._mean.shape[1:]}), got {x.shape}"
             )
 
-        if self.training:
+        if self.training and update:
             self.update(x)
         if center:
             return (x - self._mean) / (self._std + self.eps)
@@ -406,41 +446,305 @@ class EmpiricalNormalization(nn.Module):
 
     @torch.jit.unused
     def update(self, x):
-        """Learn input values using Welford's online algorithm"""
         if self.until is not None and self.count >= self.until:
             return
 
-        batch_size = x.shape[0]
-        batch_mean = torch.mean(x, dim=0, keepdim=True)
+        if dist.is_available() and dist.is_initialized():
+            # Calculate global batch size arithmetically
+            local_batch_size = x.shape[0]
+            world_size = dist.get_world_size()
+            global_batch_size = world_size * local_batch_size
 
-        # Update count
-        new_count = self.count + batch_size
+            # Calculate the stats
+            x_shifted = x - self._mean
+            local_sum_shifted = torch.sum(x_shifted, dim=0, keepdim=True)
+            local_sum_sq_shifted = torch.sum(x_shifted.pow(2), dim=0, keepdim=True)
+
+            # Sync the stats across all processes
+            stats_to_sync = torch.cat([local_sum_shifted, local_sum_sq_shifted], dim=0)
+            dist.all_reduce(stats_to_sync, op=dist.ReduceOp.SUM)
+            global_sum_shifted, global_sum_sq_shifted = stats_to_sync
+
+            # Calculate the mean and variance of the global batch
+            batch_mean_shifted = global_sum_shifted / global_batch_size
+            batch_var = (
+                global_sum_sq_shifted / global_batch_size - batch_mean_shifted.pow(2)
+            )
+            batch_mean = batch_mean_shifted + self._mean
+
+        else:
+            global_batch_size = x.shape[0]
+            batch_mean = torch.mean(x, dim=0, keepdim=True)
+            batch_var = torch.var(x, dim=0, keepdim=True, unbiased=False)
+
+        new_count = self.count + global_batch_size
 
         # Update mean
         delta = batch_mean - self._mean
-        self._mean += (batch_size / new_count) * delta
+        self._mean.copy_(self._mean + delta * (global_batch_size / new_count))
 
-        # Update variance using Welford's parallel algorithm
-        if self.count > 0:  # Ensure we're not dividing by zero
-            # Compute batch variance
-            batch_var = torch.mean((x - batch_mean) ** 2, dim=0, keepdim=True)
-
-            # Combine variances using parallel algorithm
-            delta2 = batch_mean - self._mean
-            m_a = self._var * self.count
-            m_b = batch_var * batch_size
-            M2 = m_a + m_b + (delta2**2) * (self.count * batch_size / new_count)
-            self._var = M2 / new_count
-        else:
-            # For first batch, just use batch variance
-            self._var = torch.mean((x - self._mean) ** 2, dim=0, keepdim=True)
-
-        self._std = torch.sqrt(self._var)
-        self.count = new_count
+        # Update variance
+        delta2 = batch_mean - self._mean
+        m_a = self._var * self.count
+        m_b = batch_var * global_batch_size
+        M2 = m_a + m_b + delta2.pow(2) * (self.count * global_batch_size / new_count)
+        self._var.copy_(M2 / new_count)
+        self._std.copy_(self._var.sqrt())
+        self.count.copy_(new_count)
 
     @torch.jit.unused
     def inverse(self, y):
         return y * (self._std + self.eps) + self._mean
+
+
+class RewardNormalizer(nn.Module):
+    def __init__(
+        self,
+        gamma: float,
+        device: torch.device,
+        g_max: float = 10.0,
+        epsilon: float = 1e-8,
+    ):
+        super().__init__()
+        self.register_buffer(
+            "G", torch.zeros(1, device=device)
+        )  # running estimate of the discounted return
+        self.register_buffer("G_r_max", torch.zeros(1, device=device))  # running-max
+        self.G_rms = EmpiricalNormalization(shape=1, device=device)
+        self.gamma = gamma
+        self.g_max = g_max
+        self.epsilon = epsilon
+
+    def _scale_reward(self, rewards: torch.Tensor) -> torch.Tensor:
+        var_denominator = self.G_rms.std[0] + self.epsilon
+        min_required_denominator = self.G_r_max / self.g_max
+        denominator = torch.maximum(var_denominator, min_required_denominator)
+
+        return rewards / denominator
+
+    def update_stats(
+        self,
+        rewards: torch.Tensor,
+        dones: torch.Tensor,
+    ):
+        self.G = self.gamma * (1 - dones) * self.G + rewards
+        self.G_rms.update(self.G.view(-1, 1))
+
+        local_max = torch.max(torch.abs(self.G))
+
+        if dist.is_available() and dist.is_initialized():
+            dist.all_reduce(local_max, op=dist.ReduceOp.MAX)
+
+        self.G_r_max = max(self.G_r_max, local_max)
+
+    def forward(self, rewards: torch.Tensor) -> torch.Tensor:
+        return self._scale_reward(rewards)
+
+
+class PerTaskEmpiricalNormalization(nn.Module):
+    """Normalize mean and variance of values based on empirical values for each task."""
+
+    def __init__(
+        self,
+        num_tasks: int,
+        shape: tuple,
+        device: torch.device,
+        eps: float = 1e-2,
+        until: int = None,
+    ):
+        """
+        Initialize PerTaskEmpiricalNormalization module.
+
+        Args:
+            num_tasks (int): The total number of tasks.
+            shape (int or tuple of int): Shape of input values except batch axis.
+            eps (float): Small value for stability.
+            until (int or None): If specified, learns until the sum of batch sizes
+                                 for a specific task exceeds this value.
+        """
+        super().__init__()
+        if not isinstance(shape, tuple):
+            shape = (shape,)
+        self.num_tasks = num_tasks
+        self.shape = shape
+        self.eps = eps
+        self.until = until
+        self.device = device
+
+        # Buffers now have a leading dimension for tasks
+        self.register_buffer("_mean", torch.zeros(num_tasks, *shape).to(device))
+        self.register_buffer("_var", torch.ones(num_tasks, *shape).to(device))
+        self.register_buffer("_std", torch.ones(num_tasks, *shape).to(device))
+        self.register_buffer(
+            "count", torch.zeros(num_tasks, dtype=torch.long).to(device)
+        )
+
+    def forward(
+        self, x: torch.Tensor, task_ids: torch.Tensor, center: bool = True
+    ) -> torch.Tensor:
+        """
+        Normalize the input tensor `x` using statistics for the given `task_ids`.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape [num_envs, *shape].
+            task_ids (torch.Tensor): Tensor of task indices, shape [num_envs].
+            center (bool): If True, center the data by subtracting the mean.
+        """
+        if x.shape[1:] != self.shape:
+            raise ValueError(f"Expected input shape (*, {self.shape}), got {x.shape}")
+        if x.shape[0] != task_ids.shape[0]:
+            raise ValueError("Batch size of x and task_ids must match.")
+
+        # Gather the stats for the tasks in the current batch
+        # Reshape task_ids for broadcasting: [num_envs] -> [num_envs, 1, ...]
+        view_shape = (task_ids.shape[0],) + (1,) * len(self.shape)
+        task_ids_expanded = task_ids.view(view_shape).expand_as(x)
+
+        mean = self._mean.gather(0, task_ids_expanded)
+        std = self._std.gather(0, task_ids_expanded)
+
+        if self.training:
+            self.update(x, task_ids)
+
+        if center:
+            return (x - mean) / (std + self.eps)
+        else:
+            return x / (std + self.eps)
+
+    @torch.jit.unused
+    def update(self, x: torch.Tensor, task_ids: torch.Tensor):
+        """Update running statistics for the tasks present in the batch."""
+        unique_tasks = torch.unique(task_ids)
+
+        for task_id in unique_tasks:
+            if self.until is not None and self.count[task_id] >= self.until:
+                continue
+
+            # Create a mask to select data for the current task
+            mask = task_ids == task_id
+            x_task = x[mask]
+            batch_size = x_task.shape[0]
+
+            if batch_size == 0:
+                continue
+
+            # Update count for this task
+            old_count = self.count[task_id].clone()
+            new_count = old_count + batch_size
+
+            # Update mean
+            task_mean = self._mean[task_id]
+            batch_mean = torch.mean(x_task, dim=0)
+            delta = batch_mean - task_mean
+            self._mean[task_id].copy_(task_mean + (batch_size / new_count) * delta)
+
+            # Update variance using Chan's parallel algorithm
+            if old_count > 0:
+                batch_var = torch.var(x_task, dim=0, unbiased=False)
+                m_a = self._var[task_id] * old_count
+                m_b = batch_var * batch_size
+                M2 = m_a + m_b + (delta**2) * (old_count * batch_size / new_count)
+                self._var[task_id].copy_(M2 / new_count)
+            else:
+                # For the first batch of this task
+                self._var[task_id].copy_(torch.var(x_task, dim=0, unbiased=False))
+
+            self._std[task_id].copy_(torch.sqrt(self._var[task_id]))
+            self.count[task_id].copy_(new_count)
+
+
+class PerTaskRewardNormalizer(nn.Module):
+    def __init__(
+        self,
+        num_tasks: int,
+        gamma: float,
+        device: torch.device,
+        g_max: float = 10.0,
+        epsilon: float = 1e-8,
+    ):
+        """
+        Per-task reward normalizer, motivation comes from BRC (https://arxiv.org/abs/2505.23150v1)
+        """
+        super().__init__()
+        self.num_tasks = num_tasks
+        self.gamma = gamma
+        self.g_max = g_max
+        self.epsilon = epsilon
+        self.device = device
+
+        # Per-task running estimate of the discounted return
+        self.register_buffer("G", torch.zeros(num_tasks, device=device))
+        # Per-task running-max of the discounted return
+        self.register_buffer("G_r_max", torch.zeros(num_tasks, device=device))
+        # Use the new per-task normalizer for the statistics of G
+        self.G_rms = PerTaskEmpiricalNormalization(
+            num_tasks=num_tasks, shape=(1,), device=device
+        )
+
+    def _scale_reward(
+        self, rewards: torch.Tensor, task_ids: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Scales rewards using per-task statistics.
+
+        Args:
+            rewards (torch.Tensor): Reward tensor, shape [num_envs].
+            task_ids (torch.Tensor): Task indices, shape [num_envs].
+        """
+        # Gather stats for the tasks in the batch
+        std_for_batch = self.G_rms._std.gather(0, task_ids.unsqueeze(-1)).squeeze(-1)
+        g_r_max_for_batch = self.G_r_max.gather(0, task_ids)
+
+        var_denominator = std_for_batch + self.epsilon
+        min_required_denominator = g_r_max_for_batch / self.g_max
+        denominator = torch.maximum(var_denominator, min_required_denominator)
+
+        # Add a small epsilon to the final denominator to prevent division by zero
+        # in case g_r_max is also zero.
+        return rewards / (denominator + self.epsilon)
+
+    def update_stats(
+        self, rewards: torch.Tensor, dones: torch.Tensor, task_ids: torch.Tensor
+    ):
+        """
+        Updates the running discounted return and its statistics for each task.
+
+        Args:
+            rewards (torch.Tensor): Reward tensor, shape [num_envs].
+            dones (torch.Tensor): Done tensor, shape [num_envs].
+            task_ids (torch.Tensor): Task indices, shape [num_envs].
+        """
+        if not (rewards.shape == dones.shape == task_ids.shape):
+            raise ValueError("rewards, dones, and task_ids must have the same shape.")
+
+        # === Update G (running discounted return) ===
+        # Gather the previous G values for the tasks in the batch
+        prev_G = self.G.gather(0, task_ids)
+        # Update G for each environment based on its own reward and done signal
+        new_G = self.gamma * (1 - dones.float()) * prev_G + rewards
+        # Scatter the updated G values back to the main buffer
+        self.G.scatter_(0, task_ids, new_G)
+
+        # === Update G_rms (statistics of G) ===
+        # The update function handles the per-task logic internally
+        self.G_rms.update(new_G.unsqueeze(-1), task_ids)
+
+        # === Update G_r_max (running max of |G|) ===
+        prev_G_r_max = self.G_r_max.gather(0, task_ids)
+        # Update the max for each environment
+        updated_G_r_max = torch.maximum(prev_G_r_max, torch.abs(new_G))
+        # Scatter the new maxes back to the main buffer
+        self.G_r_max.scatter_(0, task_ids, updated_G_r_max)
+
+    def forward(self, rewards: torch.Tensor, task_ids: torch.Tensor) -> torch.Tensor:
+        """
+        Normalizes rewards. During training, it also updates the running statistics.
+
+        Args:
+            rewards (torch.Tensor): Reward tensor, shape [num_envs].
+            task_ids (torch.Tensor): Task indices, shape [num_envs].
+        """
+        return self._scale_reward(rewards, task_ids)
 
 
 def cpu_state(sd):
@@ -459,11 +763,18 @@ def save_params(
     save_path,
 ):
     """Save model parameters and training configuration to disk."""
+
+    def get_ddp_state_dict(model):
+        """Get state dict from model, handling DDP wrapper if present."""
+        if hasattr(model, "module"):
+            return model.module.state_dict()
+        return model.state_dict()
+
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     save_dict = {
-        "actor_state_dict": cpu_state(actor.state_dict()),
-        "qnet_state_dict": cpu_state(qnet.state_dict()),
-        "qnet_target_state_dict": cpu_state(qnet_target.state_dict()),
+        "actor_state_dict": cpu_state(get_ddp_state_dict(actor)),
+        "qnet_state_dict": cpu_state(get_ddp_state_dict(qnet)),
+        "qnet_target_state_dict": cpu_state(get_ddp_state_dict(qnet_target)),
         "obs_normalizer_state": (
             cpu_state(obs_normalizer.state_dict())
             if hasattr(obs_normalizer, "state_dict")
@@ -479,3 +790,24 @@ def save_params(
     }
     torch.save(save_dict, save_path, _use_new_zipfile_serialization=True)
     print(f"Saved parameters and configuration to {save_path}")
+
+
+def get_ddp_state_dict(model):
+    """Get state dict from model, handling DDP wrapper if present."""
+    if hasattr(model, "module"):
+        return model.module.state_dict()
+    return model.state_dict()
+
+
+def load_ddp_state_dict(model, state_dict):
+    """Load state dict into model, handling DDP wrapper if present."""
+    if hasattr(model, "module"):
+        model.module.load_state_dict(state_dict)
+    else:
+        model.load_state_dict(state_dict)
+
+
+@torch.no_grad()
+def mark_step():
+    # call this once per iteration *before* any compiled function
+    torch.compiler.cudagraph_mark_step_begin()
