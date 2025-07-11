@@ -1,0 +1,137 @@
+10:44:03 - root - INFO - Experiment directory: experiments/2025-07-03/10-44-03
+10:44:03 - root - INFO - Configuration saved to: experiments/2025-07-03/10-44-03/config.json
+10:44:03 - root - INFO - Using device: cuda
+10:44:03 - root - INFO - Training T1JoystickFlatTerrain
+10:44:03 - root - INFO -   Agents 1 & 2: 100,000 timesteps
+10:44:03 - root - INFO -   Main Agent: 1,000,000 timesteps
+10:44:03 - root - INFO - Trajectory filtering starts at step 50000
+10:44:03 - root - INFO - Top-k trajectories: 10
+10:44:03 - root - INFO - Verbose logging: False
+10:44:04 - jax._src.xla_bridge - INFO - Unable to initialize backend 'rocm': module 'jaxlib.xla_extension' has no attribute 'GpuAllocatorConfig'
+10:44:04 - jax._src.xla_bridge - INFO - Unable to initialize backend 'tpu': INTERNAL: Failed to open libtpu.so: libtpu.so: cannot open shared object file: No such file or directory
+10:44:04 - root - INFO - Using JAX default device: cuda:0.
+10:44:04 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:44:04 - root - INFO - Using JAX default device: cuda:0.
+10:44:04 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:44:07 - root - INFO - Using JAX default device: cuda:0.
+10:44:07 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:44:07 - root - INFO - Using JAX default device: cuda:0.
+10:44:07 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:44:09 - root - INFO - Using JAX default device: cuda:0.
+10:44:09 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:44:09 - root - INFO - Using JAX default device: cuda:0.
+10:44:09 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:44:11 - root - INFO - Using JAX default device: cuda:0.
+10:44:11 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:44:17 - root - INFO - Created shared FAISS storage with state dimension 85
+10:44:17 - Agent_1 - INFO - Initializing with seed 343
+10:44:17 - root - INFO - Using JAX default device: cuda:0.
+10:44:17 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:44:17 - root - INFO - Using JAX default device: cuda:0.
+10:44:17 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:44:19 - root - INFO - Using JAX default device: cuda:0.
+10:44:19 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:44:19 - root - INFO - Using JAX default device: cuda:0.
+10:44:19 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:44:21 - root - INFO - Using JAX default device: cuda:0.
+10:44:21 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:44:21 - root - INFO - Using JAX default device: cuda:0.
+10:44:21 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:44:23 - root - INFO - Using JAX default device: cuda:0.
+10:44:23 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:44:23 - root - INFO - Using JAX default device: cuda:0.
+10:44:23 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:44:25 - root - INFO - Using JAX default device: cuda:0.
+10:44:25 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:44:25 - root - INFO - Using JAX default device: cuda:0.
+10:44:25 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:44:27 - root - INFO - Using JAX default device: cuda:0.
+10:44:27 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:44:27 - root - INFO - Using JAX default device: cuda:0.
+10:44:27 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:44:29 - root - INFO - Using JAX default device: cuda:0.
+10:44:29 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:44:35 - Agent_1 - INFO - Initialized with 64 environments
+10:44:35 - Agent_2 - INFO - Initializing with seed 60
+10:44:35 - root - INFO - Using JAX default device: cuda:0.
+10:44:35 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:44:35 - root - INFO - Using JAX default device: cuda:0.
+10:44:35 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:44:38 - root - INFO - Using JAX default device: cuda:0.
+10:44:38 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:44:38 - root - INFO - Using JAX default device: cuda:0.
+10:44:38 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:44:39 - root - INFO - Using JAX default device: cuda:0.
+10:44:39 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:44:39 - root - INFO - Using JAX default device: cuda:0.
+10:44:39 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:44:41 - root - INFO - Using JAX default device: cuda:0.
+10:44:41 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:44:41 - root - INFO - Using JAX default device: cuda:0.
+10:44:41 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:44:44 - root - INFO - Using JAX default device: cuda:0.
+10:44:44 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:44:44 - root - INFO - Using JAX default device: cuda:0.
+10:44:44 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:44:45 - root - INFO - Using JAX default device: cuda:0.
+10:44:45 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:44:45 - root - INFO - Using JAX default device: cuda:0.
+10:44:45 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:44:47 - root - INFO - Using JAX default device: cuda:0.
+10:44:47 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:44:53 - Agent_2 - INFO - Initialized with 64 environments
+10:44:53 - Agent_main - INFO - Initializing with seed 531
+10:44:53 - root - INFO - Using JAX default device: cuda:0.
+10:44:53 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:44:53 - root - INFO - Using JAX default device: cuda:0.
+10:44:53 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:44:55 - root - INFO - Using JAX default device: cuda:0.
+10:44:55 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:44:55 - root - INFO - Using JAX default device: cuda:0.
+10:44:55 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:44:57 - root - INFO - Using JAX default device: cuda:0.
+10:44:57 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:44:57 - root - INFO - Using JAX default device: cuda:0.
+10:44:57 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:44:59 - root - INFO - Using JAX default device: cuda:0.
+10:44:59 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:44:59 - root - INFO - Using JAX default device: cuda:0.
+10:44:59 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:45:01 - root - INFO - Using JAX default device: cuda:0.
+10:45:01 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:45:01 - root - INFO - Using JAX default device: cuda:0.
+10:45:01 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:45:03 - root - INFO - Using JAX default device: cuda:0.
+10:45:03 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:45:03 - root - INFO - Using JAX default device: cuda:0.
+10:45:03 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:45:05 - root - INFO - Using JAX default device: cuda:0.
+10:45:05 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:45:11 - Agent_main - INFO - Initialized with 256 environments
+10:45:11 - Agent_main - INFO - Initialized with 256 environments
+10:45:11 - Agent_main - INFO - Will use 50% FAISS states for initialization when available
+10:45:11 - root - INFO - Starting multi-agent training...
+10:45:11 - Agent_1 - INFO - Starting training loop
+10:45:11 - Agent_2 - INFO - Starting training loop
+10:45:11 - Agent_main - INFO - Starting training loop
+10:45:52 - root - INFO - Using JAX default device: cuda:0.
+10:45:52 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:45:58 - root - INFO - Using JAX default device: cuda:0.
+10:45:58 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:46:26 - root - INFO - Using JAX default device: cuda:0.
+10:46:26 - root - INFO - MJX Warp is disabled via MJX_WARP_ENABLED=false.
+10:47:10 - Agent_main - INFO - Started trajectory filtering at step 57344
+10:47:29 - Agent_2 - INFO - Started trajectory filtering at step 53248
+10:47:30 - Agent_1 - INFO - Started trajectory filtering at step 53248
+10:47:51 - Agent_main - INFO - Activating FAISS state initialization at step 196608 with 140 states (filter threshold: 50000)
+10:48:08 - Agent_2 - INFO - Training completed at step 102400
+10:48:08 - Agent_1 - INFO - Training completed at step 102400
+10:50:00 - Agent_main - INFO - Training completed at step 1007616
+10:50:11 - root - INFO - Stopping agents...
+10:50:11 - root - INFO - Saved shared FAISS storage to experiments/2025-07-03/10-44-03/shared_faiss_storage
+10:50:19 - root - INFO - Generated 4 spatial coverage visualizations:
+10:50:19 - root - INFO -   - faiss_states_by_agent.png
+10:50:19 - root - INFO -   - faiss_states_by_reward.png
+10:50:19 - root - INFO -   - faiss_grid_coverage.png
+10:50:19 - root - INFO -   - faiss_analysis_summary.png
+10:50:19 - root - INFO - Multi-agent training completed!

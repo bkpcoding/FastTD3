@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 from typing import Optional
 import tyro
+import os
+from datetime import datetime
 
 
 @dataclass
@@ -53,8 +55,10 @@ class MultiAgentConfig:
     """Type of environment."""
     
     # Training settings
-    total_timesteps: int = 1000000
-    """Total timesteps to train for."""
+    total_timesteps: int = 100000
+    """Total timesteps to train for (agents 1 and 2)."""
+    main_agent_timesteps: int = 1000000
+    """Total timesteps to train for main agent."""
     seed: int = 42
     """Random seed."""
     
@@ -81,6 +85,17 @@ class MultiAgentConfig:
     )
     """Configuration for agent 2."""
     
+    main_agent_config: AgentConfig = AgentConfig(
+        num_envs=256,
+        rollout_length=32,
+        learning_rate=2e-4,
+        gamma=0.99,
+        gae_lambda=0.95,
+        batch_size=512,
+        hidden_dim=256
+    )
+    """Configuration for main agent with FAISS state initialization."""
+    
     # Trajectory filtering settings
     trajectory_filter_timestep: int = 50000
     """Timestep after which to start filtering trajectories."""
@@ -98,7 +113,7 @@ class MultiAgentConfig:
     """Interval for logging."""
     eval_interval: int = 50000
     """Interval for evaluation."""
-    num_eval_envs: int = 5
+    num_eval_envs: int = 512
     """Number of evaluation environments per agent."""
     
     # Output settings
@@ -107,11 +122,24 @@ class MultiAgentConfig:
     save_interval: int = 100000
     """Interval for saving models."""
     
+    def get_experiment_dir(self) -> str:
+        """Generate timestamped experiment directory."""
+        now = datetime.now()
+        date_str = now.strftime("%Y-%m-%d")
+        time_str = now.strftime("%H-%M-%S")
+        experiment_dir = os.path.join("experiments", date_str, time_str)
+        os.makedirs(experiment_dir, exist_ok=True)
+        return experiment_dir
+    
     # Wandb settings
     use_wandb: bool = False
     """Whether to use Weights & Biases logging."""
-    project: str = "multi_agent_ppo"
+    project: str = "rl_scratch"
     """Wandb project name."""
+    
+    # Logging settings
+    verbose: bool = False
+    """Enable verbose logging output."""
     
     # Performance settings
     compile: bool = False
@@ -137,12 +165,28 @@ def validate_config(config: MultiAgentConfig) -> None:
             f"must be less than total_timesteps ({config.total_timesteps})"
         )
     
+    if config.trajectory_filter_timestep >= config.main_agent_timesteps:
+        raise ValueError(
+            f"trajectory_filter_timestep ({config.trajectory_filter_timestep}) "
+            f"must be less than main_agent_timesteps ({config.main_agent_timesteps})"
+        )
+    
+    if config.main_agent_timesteps <= 0:
+        raise ValueError(f"main_agent_timesteps must be positive, got {config.main_agent_timesteps}")
+    
+    if config.total_timesteps <= 0:
+        raise ValueError(f"total_timesteps must be positive, got {config.total_timesteps}")
+    
     # Validate top_k setting
     if config.top_k_trajectories <= 0:
         raise ValueError(f"top_k_trajectories must be positive, got {config.top_k_trajectories}")
     
     # Validate agent configurations
-    for agent_name, agent_config in [("agent_1", config.agent_1_config), ("agent_2", config.agent_2_config)]:
+    for agent_name, agent_config in [
+        ("agent_1", config.agent_1_config), 
+        ("agent_2", config.agent_2_config),
+        ("main_agent", config.main_agent_config)
+    ]:
         if agent_config.num_envs <= 0:
             raise ValueError(f"{agent_name} num_envs must be positive, got {agent_config.num_envs}")
         if agent_config.rollout_length <= 0:
@@ -155,6 +199,20 @@ def validate_config(config: MultiAgentConfig) -> None:
             raise ValueError(f"{agent_name} gae_lambda must be in [0, 1], got {agent_config.gae_lambda}")
     
     print("Multi-agent configuration validated successfully.")
+
+
+def save_config_to_experiment_dir(config: MultiAgentConfig, experiment_dir: str) -> str:
+    """Save configuration to experiment directory as JSON."""
+    import json
+    from dataclasses import asdict
+    
+    config_path = os.path.join(experiment_dir, "config.json")
+    config_dict = asdict(config)
+    
+    with open(config_path, 'w') as f:
+        json.dump(config_dict, f, indent=2)
+    
+    return config_path
 
 
 if __name__ == "__main__":

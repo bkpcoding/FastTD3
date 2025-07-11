@@ -8,6 +8,7 @@ record.ipynb
 .ipynb_checkpoints
 fast_td3.egg-info/
 outputs/
+*.index
 *.err
 *.out
 *.sif
