@@ -6,39 +6,38 @@ import torch.nn.functional as F
 def calculate_network_norms(network: nn.Module, prefix: str = ""):
     """
     Calculate various norms of network parameters for logging.
-    
+
     Args:
         network: PyTorch network module
         prefix: String prefix for metric names
-        
+
     Returns:
         Dictionary of norm metrics
     """
     metrics = {}
-    
+
     # Calculate total parameter norm
     total_norm = 0.0
     param_count = 0
-    
+
     # Calculate layer-wise norms
     layer_norms = {}
-    
+
     for name, param in network.named_parameters():
         if param.requires_grad:
             param_norm = param.data.norm(2).item()
             layer_norms[f"{prefix}_{name}_norm"] = param_norm
-            total_norm += param_norm ** 2
+            total_norm += param_norm**2
             param_count += param.numel()
-    
+
     # Total parameter norm
-    total_norm = total_norm ** 0.5
+    total_norm = total_norm**0.5
     metrics[f"{prefix}_total_param_norm"] = total_norm
     metrics[f"{prefix}_param_count"] = param_count
-    
+
     # Add layer-wise norms
     metrics.update(layer_norms)
-    
-    
+
     return metrics
 
 
@@ -78,14 +77,17 @@ class DistributionalQNetwork(nn.Module):
         actions: torch.Tensor,
         rewards: torch.Tensor,
         bootstrap: torch.Tensor,
-        gamma: float,
+        discount: float,
         q_support: torch.Tensor,
         device: torch.device,
     ) -> torch.Tensor:
         delta_z = (self.v_max - self.v_min) / (self.num_atoms - 1)
         batch_size = rewards.shape[0]
 
-        target_z = rewards.unsqueeze(1) + bootstrap.unsqueeze(1) * gamma * q_support
+        target_z = (
+            rewards.unsqueeze(1)
+            + bootstrap.unsqueeze(1) * discount.unsqueeze(1) * q_support
+        )
         target_z = target_z.clamp(self.v_min, self.v_max)
         b = (target_z - self.v_min) / delta_z
         l = torch.floor(b).long()
@@ -150,6 +152,7 @@ class Critic(nn.Module):
         self.register_buffer(
             "q_support", torch.linspace(v_min, v_max, num_atoms, device=device)
         )
+        self.device = device
 
     def forward(self, obs: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
         return self.qnet1(obs, actions), self.qnet2(obs, actions)
@@ -160,7 +163,7 @@ class Critic(nn.Module):
         actions: torch.Tensor,
         rewards: torch.Tensor,
         bootstrap: torch.Tensor,
-        gamma: float,
+        discount: float,
     ) -> torch.Tensor:
         """Projection operation that includes q_support directly"""
         q1_proj = self.qnet1.projection(
@@ -168,7 +171,7 @@ class Critic(nn.Module):
             actions,
             rewards,
             bootstrap,
-            gamma,
+            discount,
             self.q_support,
             self.q_support.device,
         )
@@ -177,7 +180,7 @@ class Critic(nn.Module):
             actions,
             rewards,
             bootstrap,
-            gamma,
+            discount,
             self.q_support,
             self.q_support.device,
         )
@@ -225,6 +228,7 @@ class Actor(nn.Module):
         self.register_buffer("std_min", torch.as_tensor(std_min, device=device))
         self.register_buffer("std_max", torch.as_tensor(std_max, device=device))
         self.n_envs = num_envs
+        self.device = device
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         x = obs
@@ -246,7 +250,9 @@ class Actor(nn.Module):
 
             # Update only the noise scales for environments that are done
             dones_view = dones.view(-1, 1) > 0
-            self.noise_scales = torch.where(dones_view, new_scales, self.noise_scales)
+            self.noise_scales.copy_(
+                torch.where(dones_view, new_scales, self.noise_scales)
+            )
 
         act = self(obs)
         if deterministic:
@@ -254,3 +260,55 @@ class Actor(nn.Module):
 
         noise = torch.randn_like(act) * self.noise_scales
         return act + noise
+
+
+class MultiTaskActor(Actor):
+    def __init__(self, num_tasks: int, task_embedding_dim: int, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.num_tasks = num_tasks
+        self.task_embedding_dim = task_embedding_dim
+        self.task_embedding = nn.Embedding(
+            num_tasks, task_embedding_dim, max_norm=1.0, device=self.device
+        )
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        # TODO: Optimize the code to be compatible with cudagraphs
+        # Currently in-place creation of task_indices is not compatible with cudagraphs
+        task_ids_one_hot = obs[..., -self.num_tasks :]
+        task_indices = torch.argmax(task_ids_one_hot, dim=1)
+        task_embeddings = self.task_embedding(task_indices)
+        obs = torch.cat([obs[..., : -self.num_tasks], task_embeddings], dim=-1)
+        return super().forward(obs)
+
+
+class MultiTaskCritic(Critic):
+    def __init__(self, num_tasks: int, task_embedding_dim: int, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.num_tasks = num_tasks
+        self.task_embedding_dim = task_embedding_dim
+        self.task_embedding = nn.Embedding(
+            num_tasks, task_embedding_dim, max_norm=1.0, device=self.device
+        )
+
+    def forward(self, obs: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
+        # TODO: Optimize the code to be compatible with cudagraphs
+        # Currently in-place creation of task_indices is not compatible with cudagraphs
+        task_ids_one_hot = obs[..., -self.num_tasks :]
+        task_indices = torch.argmax(task_ids_one_hot, dim=1)
+        task_embeddings = self.task_embedding(task_indices)
+        obs = torch.cat([obs[..., : -self.num_tasks], task_embeddings], dim=-1)
+        return super().forward(obs, actions)
+
+    def projection(
+        self,
+        obs: torch.Tensor,
+        actions: torch.Tensor,
+        rewards: torch.Tensor,
+        bootstrap: torch.Tensor,
+        discount: float,
+    ) -> torch.Tensor:
+        task_ids_one_hot = obs[..., -self.num_tasks :]
+        task_indices = torch.argmax(task_ids_one_hot, dim=1)
+        task_embeddings = self.task_embedding(task_indices)
+        obs = torch.cat([obs[..., : -self.num_tasks], task_embeddings], dim=-1)
+        return super().projection(obs, actions, rewards, bootstrap, discount)

@@ -8,6 +8,22 @@ FastTD3 is a high-performance variant of the Twin Delayed Deep Deterministic Pol
 
 For more information, please see our [project webpage](https://younggyo.me/fast_td3)
 
+
+## ❗ Updates
+
+- **[Jul/07/2025]** Added support for multi-GPU training! See [Multi-GPU Training](#multi-gpu-training) section for details. 
+
+- **[Jul/02/2025]** Optimized codebase to speed up training around 10-30% when using a single RTX 4090 GPU.
+
+- **[Jun/20/2025]** Added support for [MTBench](https://github.com/Viraj-Joshi/MTBench) with the help of [Viraj Joshi](https://viraj-joshi.github.io/).
+
+- **[Jun/15/2025]** Added support for FastTD3 + [SimbaV2](https://dojeon-ai.github.io/SimbaV2/)! It's faster to train, and often achieves better asymptotic performance. We recommend using FastTD3 + SimbaV2 for most cases.
+
+- **[Jun/06/2025]** Thanks to [Antonin Raffin](https://araffin.github.io/) ([@araffin](https://github.com/araffin)), we fixed the issues when using `n_steps` > 1, which stabilizes training with n-step return quite a lot!
+
+- **[Jun/01/2025]** Updated the figures in the technical report to report deterministic evaluation for IsaacLab tasks.
+
+
 ## ✨ Features
 
 FastTD3 offers researchers a significant speedup in training complex humanoid agents.
@@ -72,6 +88,27 @@ cd ..
 pip install -r requirements/requirements.txt
 ```
 
+### Environment for MTBench
+MTBench does not support humanoid experiments, but is a useful multi-task benchmark with massive parallel simulation. This could be useful for users who want to use FastTD3 for their multi-task experiments.
+
+```bash
+conda create -n fasttd3_mtbench -y python=3.8  # Note python version
+conda activate fasttd3_mtbench
+
+# Install IsaacGym -- recommend to follow instructions in https://github.com/BoosterRobotics/booster_gym
+...
+
+# Install MTBench
+git clone https://github.com/Viraj-Joshi/MTBench.git
+cd MTbench
+pip install -e .
+pip install skrl
+cd ..
+
+# Install project-specific requirements
+pip install -r requirements/requirements_isaacgym.txt
+```
+
 ### (Optional) Accelerate headless GPU rendering in cloud instances
 
 In some cloud VM images the NVIDIA kernel driver is present but the user-space OpenGL/EGL/Vulkan libraries aren't, so MuJoCo falls back to CPU renderer. You can install just the NVIDIA user-space libraries (and skip rebuilding the kernel module) with:
@@ -92,21 +129,105 @@ Please see `fast_td3/hyperparams.py` for information regarding hyperparameters!
 ### HumanoidBench Experiments
 ```bash
 conda activate fasttd3_hb
-python fast_td3/train.py --env_name h1hand-hurdle-v0 --exp_name FastTD3 --render_interval 5000 --seed 1
+# FastTD3
+python fast_td3/train.py \
+    --env_name h1hand-hurdle-v0 \
+    --exp_name FastTD3 \
+    --render_interval 5000 \
+    --seed 1
+# FastTD3 + SimbaV2
+python fast_td3/train.py \
+    --env_name h1hand-hurdle-v0 \
+    --exp_name FastTD3 \
+    --render_interval 5000 \
+    --agent fasttd3_simbav2 \
+    --batch_size 8192 \
+    --critic_learning_rate_end 3e-5 \
+    --actor_learning_rate_end 3e-5 \
+    --weight_decay 0.0 \
+    --critic_hidden_dim 512 \
+    --critic_num_blocks 2 \
+    --actor_hidden_dim 256 \
+    --actor_num_blocks 1 \
+    --seed 1
 ```
 
 ### MuJoCo Playground Experiments
 ```bash
 conda activate fasttd3_playground
-python fast_td3/train.py --env_name T1JoystickFlatTerrain --exp_name FastTD3 --render_interval 5000 --seed 1
-python fast_td3/train.py --env_name G1JoystickFlatTerrain --exp_name FastTD3 --render_interval 5000 --seed 1
+# FastTD3
+python fast_td3/train.py \
+    --env_name T1JoystickFlatTerrain \
+    --exp_name FastTD3 \
+    --render_interval 5000 \
+    --seed 1
+# FastTD3 + SimbaV2
+python fast_td3/train.py \
+    --env_name T1JoystickFlatTerrain \
+    --exp_name FastTD3 \
+    --render_interval 5000 \
+    --agent fasttd3_simbav2 \
+    --batch_size 8192 \
+    --critic_learning_rate_end 3e-5 \
+    --actor_learning_rate_end 3e-5 \
+    --weight_decay 0.0 \
+    --critic_hidden_dim 512 \
+    --critic_num_blocks 2 \
+    --actor_hidden_dim 256 \
+    --actor_num_blocks 1 \
+    --seed 1
 ```
 
 ### IsaacLab Experiments
 ```bash
 conda activate fasttd3_isaaclab
-python fast_td3/train.py --env_name Isaac-Velocity-Flat-G1-v0 --exp_name FastTD3 --render_interval 0 --seed 1
-python fast_td3/train.py --env_name Isaac-Repose-Cube-Allegro-Direct-v0 --exp_name FastTD3 --render_interval 0 --seed 1
+# FastTD3
+python fast_td3/train.py \
+    --env_name Isaac-Velocity-Flat-G1-v0 \
+    --exp_name FastTD3 \
+    --render_interval 0 \
+    --seed 1
+# FastTD3 + SimbaV2
+python fast_td3/train.py \
+    --env_name Isaac-Repose-Cube-Allegro-Direct-v0 \
+    --exp_name FastTD3 \
+    --render_interval 0 \
+    --agent fasttd3_simbav2 \
+    --batch_size 8192 \
+    --critic_learning_rate_end 3e-5 \
+    --actor_learning_rate_end 3e-5 \
+    --weight_decay 0.0 \
+    --critic_hidden_dim 512 \
+    --critic_num_blocks 2 \
+    --actor_hidden_dim 256 \
+    --actor_num_blocks 1 \
+    --seed 1
+```
+
+### MTBench Experiments
+```bash
+conda activate fasttd3_mtbench
+# FastTD3
+python fast_td3/train.py \
+    --env_name MTBench-meta-world-v2-mt10 \
+    --exp_name FastTD3 \
+    --render_interval 0 \
+    --seed 1
+# FastTD3 + SimbaV2
+python fast_td3/train.py \
+    --env_name MTBench-meta-world-v2-mt10 \
+    --exp_name FastTD3 \
+    --render_interval 0 \
+    --agent fasttd3_simbav2 \
+    --batch_size 8192 \
+    --critic_learning_rate_end 3e-5 \
+    --actor_learning_rate_end 3e-5 \
+    --weight_decay 0.0 \
+    --critic_hidden_dim 1024 \
+    --critic_num_blocks 2 \
+    --actor_hidden_dim 512 \
+    --actor_num_blocks 1 \
+    --seed 1
 ```
 
 **Quick note:** For boolean-based arguments, you can set them to False by adding `no_` in front each argument, for instance, if you want to disable Clipped Q Learning, you can specify `--no_use_cdq` in your command.
@@ -121,6 +242,19 @@ We used a single Nvidia A100 80GB GPU for all experiments. Here are some remarks
   - If the agent is completely stuck or much worse than your expectation, try using `num_steps=3` or disabling `use_cdq`.
   - For tasks that have penalty reward terms (e.g., torques, energy, action_rate, ..), consider lowering them for initial experiments, and tune the values. In some cases, curriculum learning with lower penalty terms followed by fine-tuning with stronger terms is effective.
 - When you encounter out-of-memory error with your GPU, our recommendation for reducing GPU usage is (i) smaller `buffer_size`, (ii) smaller `batch_size`, and then (iii) smaller `num_envs`. Because our codebase is assigning the whole replay buffer in GPU to reduce CPU-GPU transfer bottleneck, it usually has the largest GPU consumption, but usually less harmful to reduce.
+- Consider using `--compile_mode max-autotune` if you plan to run for many training steps. This may speed up training by up to 10% at the cost of a few additional minutes of heavy compilation.
+
+## Multi-GPU Training
+We support multi-GPU training. If your machine supports multiple GPUs, or specify multiple GPUs using `CUDA_VISIBLE_DEVICES`, and run `train_multigpu.py`, it will automatically use all GPUs to scale up training.
+
+**Important:** Our multi-GPU implementation launches the **same experiment independently on each GPU** rather than distributing parameters across GPUs. This means:
+- Effective number of environments: `num_envs × num_gpus`
+- Effective batch size: `batch_size × num_gpus` 
+- Effective buffer size: `buffer_size × num_gpus`
+
+Each GPU runs a complete copy of the training process, which scales up data collection and training throughput proportionally to the number of GPUs.
+
+For instance, running IsaacLab experiments with 4 GPUs and `num_envs=1024` will end up in similar results as experiments with 1 GPU with `num_envs=4096`.
 
 ## 🛝 Playing with the FastTD3 training
 
@@ -172,6 +306,16 @@ We would like to thank people who have helped throughout the project:
   pages={1587--1596},
   year={2018},
   organization={PMLR}
+}
+```
+
+### SimbaV2
+```bibtex
+@article{lee2025hyperspherical,
+  title={Hyperspherical normalization for scalable deep reinforcement learning},
+  author={Lee, Hojoon and Lee, Youngdo and Seno, Takuma and Kim, Donghu and Stone, Peter and Choo, Jaegul},
+  journal={arXiv preprint arXiv:2502.15280},
+  year={2025}
 }
 ```
 
@@ -238,6 +382,18 @@ Following the [LeanRL](https://github.com/pytorch-labs/LeanRL)'s recommendation,
 }
 ```
 
+### MTBench
+```bibtex
+@inproceedings{
+joshi2025benchmarking,
+title={Benchmarking Massively Parallelized Multi-Task Reinforcement Learning for Robotics Tasks},
+author={Viraj Joshi and Zifan Xu and Bo Liu and Peter Stone and Amy Zhang},
+booktitle={Reinforcement Learning Conference},
+year={2025},
+url={https://openreview.net/forum?id=z0MM0y20I2}
+}
+```
+
 ### Getting SAC to Work on a Massive Parallel Simulator
 ```bibtex
 @article{raffin2025isaacsim,
@@ -261,4 +417,3 @@ Following the [LeanRL](https://github.com/pytorch-labs/LeanRL)'s recommendation,
   url     = "https://arthshukla.substack.com/p/speeding-up-sac-with-massively-parallel"
 }
 ```
-

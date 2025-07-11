@@ -10,6 +10,8 @@ class BaseArgs:
     # See IsaacLabArgs for default hyperparameters for IsaacLab
     env_name: str = "h1hand-stand-v0"
     """the id of the environment"""
+    agent: str = "fasttd3"
+    """the agent to use: currently support [fasttd3, fasttd3_simbav2]"""
     seed: int = 1
     """seed of the experiment"""
     torch_deterministic: bool = True
@@ -38,6 +40,10 @@ class BaseArgs:
     """the learning rate of the critic"""
     actor_learning_rate: float = 3e-4
     """the learning rate for the actor"""
+    critic_learning_rate_end: float = 3e-4
+    """the learning rate of the critic at the end of training"""
+    actor_learning_rate_end: float = 3e-4
+    """the learning rate for the actor at the end of training"""
     buffer_size: int = 1024 * 50
     """the replay memory buffer size"""
     num_steps: int = 1
@@ -74,6 +80,10 @@ class BaseArgs:
     """the hidden dimension of the critic network"""
     actor_hidden_dim: int = 512
     """the hidden dimension of the actor network"""
+    critic_num_blocks: int = 2
+    """(SimbaV2 only) the number of blocks in the critic network"""
+    actor_num_blocks: int = 1
+    """(SimbaV2 only) the number of blocks in the actor network"""
     use_cdq: bool = True
     """whether to use Clipped Double Q-learning"""
     measure_burnin: int = 3
@@ -84,8 +94,14 @@ class BaseArgs:
     """the interval to render the model"""
     compile: bool = True
     """whether to use torch.compile."""
+    compile_mode: str = "reduce-overhead"
+    """the mode of torch.compile."""
     obs_normalization: bool = True
     """whether to enable observation normalization"""
+    reward_normalization: bool = False
+    """whether to enable reward normalization"""
+    use_grad_norm_clipping: bool = False
+    """whether to use gradient norm clipping."""
     max_grad_norm: float = 0.0
     """the maximum gradient norm"""
     amp: bool = True
@@ -103,6 +119,8 @@ class BaseArgs:
     """(Playground only) Use tuned reward for G1"""
     action_bounds: float = 1.0
     """(IsaacLab only) the bounds of the action space (-action_bounds, action_bounds)"""
+    task_embedding_dim: int = 32
+    """the dimension of the task embedding"""
 
     weight_decay: float = 0.1
     """the weight decay of the optimizer"""
@@ -159,6 +177,9 @@ def get_args():
         "Isaac-Velocity-Rough-G1-v0": IsaacVelocityRoughG1Args,
         "Isaac-Repose-Cube-Allegro-Direct-v0": IsaacReposeCubeAllegroDirectArgs,
         "Isaac-Repose-Cube-Shadow-Direct-v0": IsaacReposeCubeShadowDirectArgs,
+        # MTBench
+        "MTBench-meta-world-v2-mt10": MetaWorldMT10Args,
+        "MTBench-meta-world-v2-mt50": MetaWorldMT50Args,
     }
     # If the provided env_name has a specific Args class, use it
     if base_args.env_name in env_to_args_class:
@@ -173,6 +194,9 @@ def get_args():
     elif base_args.env_name.startswith("Isaac-"):
         # IsaacLab
         specific_args = tyro.cli(IsaacLabArgs)
+    elif base_args.env_name.startswith("MTBench-"):
+        # MTBench
+        specific_args = tyro.cli(MTBenchArgs)
     else:
         # MuJoCo Playground
         specific_args = tyro.cli(MuJoCoPlaygroundArgs)
@@ -271,6 +295,49 @@ class MuJoCoPlaygroundArgs(BaseArgs):
 
 
 @dataclass
+class MTBenchArgs(BaseArgs):
+    # Default hyperparameters for MTBench
+    reward_normalization: bool = True
+    v_min: float = -10.0
+    v_max: float = 10.0
+    buffer_size: int = 2048  # 2K is usually enough for MTBench
+    num_envs: int = 4096
+    num_eval_envs: int = 4096
+    gamma: float = 0.97
+    num_steps: int = 8
+    compile_mode: str = (
+        "default"  # Multi-task training is not compatible with cudagraphs
+    )
+
+
+@dataclass
+class MetaWorldMT10Args(MTBenchArgs):
+    # This config achieves 97 ~ 98% success rate within 10k steps (15-20 mins on A100)
+    env_name: str = "MTBench-meta-world-v2-mt10"
+    num_envs: int = 4096
+    num_eval_envs: int = 4096
+    num_steps: int = 8
+    gamma: float = 0.97
+    compile_mode: str = (
+        "default"  # Multi-task training is not compatible with cudagraphs
+    )
+
+
+@dataclass
+class MetaWorldMT50Args(MTBenchArgs):
+    # FastTD3 + SimbaV2 achieves >90% success rate within 20k steps (80 mins on A100)
+    # Performance further improves with more training steps, slowly.
+    env_name: str = "MTBench-meta-world-v2-mt50"
+    num_envs: int = 8192
+    num_eval_envs: int = 8192
+    num_steps: int = 8
+    gamma: float = 0.99
+    compile_mode: str = (
+        "default"  # Multi-task training is not compatible with cudagraphs
+    )
+
+
+@dataclass
 class G1JoystickFlatTerrainArgs(MuJoCoPlaygroundArgs):
     env_name: str = "G1JoystickFlatTerrain"
     total_timesteps: int = 1000000
@@ -352,6 +419,7 @@ class Go1GetupArgs(MuJoCoPlaygroundArgs):
 class LeapCubeReorientArgs(MuJoCoPlaygroundArgs):
     env_name: str = "LeapCubeReorient"
     num_steps: int = 3
+    gamma: float = 0.99
     policy_noise: float = 0.2
     v_min: float = -50.0
     v_max: float = 50.0
@@ -363,6 +431,7 @@ class LeapCubeRotateZAxisArgs(MuJoCoPlaygroundArgs):
     env_name: str = "LeapCubeRotateZAxis"
     num_steps: int = 1
     policy_noise: float = 0.2
+    gamma: float = 0.99
     v_min: float = -10.0
     v_max: float = 10.0
     use_cdq: bool = False
@@ -413,21 +482,24 @@ class IsaacOpenDrawerFrankaArgs(IsaacLabArgs):
 @dataclass
 class IsaacVelocityFlatH1Args(IsaacLabArgs):
     env_name: str = "Isaac-Velocity-Flat-H1-v0"
-    num_steps: int = 3
+    num_steps: int = 8
+    num_updates: int = 4
     total_timesteps: int = 75000
 
 
 @dataclass
 class IsaacVelocityFlatG1Args(IsaacLabArgs):
     env_name: str = "Isaac-Velocity-Flat-G1-v0"
-    num_steps: int = 3
+    num_steps: int = 8
+    num_updates: int = 4
     total_timesteps: int = 50000
 
 
 @dataclass
 class IsaacVelocityRoughH1Args(IsaacLabArgs):
     env_name: str = "Isaac-Velocity-Rough-H1-v0"
-    num_steps: int = 3
+    num_steps: int = 8
+    num_updates: int = 4
     buffer_size: int = 1024 * 5  # To reduce memory usage
     total_timesteps: int = 50000
 
@@ -435,7 +507,8 @@ class IsaacVelocityRoughH1Args(IsaacLabArgs):
 @dataclass
 class IsaacVelocityRoughG1Args(IsaacLabArgs):
     env_name: str = "Isaac-Velocity-Rough-G1-v0"
-    num_steps: int = 3
+    num_steps: int = 8
+    num_updates: int = 4
     buffer_size: int = 1024 * 5  # To reduce memory usage
     total_timesteps: int = 50000
 

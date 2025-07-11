@@ -4,13 +4,17 @@ from mujoco_playground import wrapper_torch
 import jax
 import mujoco
 
-jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
-jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
-jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
-
 
 class PlaygroundEvalEnvWrapper:
-    def __init__(self, eval_env, max_episode_steps, env_name, num_eval_envs, seed):
+    def __init__(
+        self,
+        eval_env,
+        max_episode_steps,
+        env_name,
+        num_eval_envs,
+        seed,
+        device_rank=None,
+    ):
         """
         Wrapper used for evaluation / rendering environments.
         Note that this is different from training environments that are
@@ -28,6 +32,11 @@ class PlaygroundEvalEnvWrapper:
             self.asymmetric_obs = False
 
         self.key = jax.random.PRNGKey(seed)
+
+        if device_rank is not None:
+            gpu_devices = jax.devices("gpu")
+            self.key = jax.device_put(self.key, gpu_devices[device_rank])
+
         self.key_reset = jax.random.split(self.key, num_eval_envs)
         self.max_episode_steps = max_episode_steps
 
@@ -122,7 +131,12 @@ def make_env(
         eval_env_cfg.push_config.magnitude_range = [0.0, 0.0]
     eval_env = registry.load(env_name, config=eval_env_cfg)
     eval_env = PlaygroundEvalEnvWrapper(
-        eval_env, eval_env_cfg.episode_length, env_name, num_eval_envs, seed
+        eval_env,
+        eval_env_cfg.episode_length,
+        env_name,
+        num_eval_envs,
+        seed,
+        device_rank=device_rank,
     )
 
     render_env_cfg = registry.get_default_config(env_name)
@@ -131,7 +145,12 @@ def make_env(
         render_env_cfg.push_config.magnitude_range = [0.0, 0.0]
     render_env = registry.load(env_name, config=render_env_cfg)
     render_env = PlaygroundEvalEnvWrapper(
-        render_env, render_env_cfg.episode_length, env_name, 1, seed
+        render_env,
+        render_env_cfg.episode_length,
+        env_name,
+        1,
+        seed,
+        device_rank=device_rank,
     )
 
     return train_env, eval_env, render_env
