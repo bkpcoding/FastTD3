@@ -38,10 +38,17 @@ export PYTHONPATH=\$PYTHONPATH:/nfs/turbo/coe-mandmlab/bpatil/projects/FastTD3/f
 # Run the training
 python -m fast_td3.train \
     --env_name ${env_name} \
-    --exp_name fasttd3_${env_name} \
+    --exp_name fasttd3_simbav2_${env_name} \
     --seed ${seed} \
     --agent fasttd3_simbav2 \
-
+    --batch_size 8192 \
+    --critic_learning_rate_end 3e-5 \
+    --actor_learning_rate_end 3e-5 \
+    --weight_decay 0.0 \
+    --critic_hidden_dim 512 \
+    --critic_num_blocks 2 \
+    --actor_hidden_dim 256 \
+    --actor_num_blocks 1 \
     --output_dir outputs/\${SLURM_JOB_ID}
 EOF
 

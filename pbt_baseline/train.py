@@ -1,6 +1,6 @@
-"""Minimal PPO training loop for FastTD3 environments."""
+"""Minimal PPO training loop for FastTD3 environments with PBT baseline."""
 
-from .hyperparams import get_args
+from pbt_baseline.hyperparams import get_args
 import torch
 import torch.optim as optim
 from torch.nn import functional as F
@@ -11,12 +11,14 @@ from tqdm import tqdm
 import numpy as np
 import jax.numpy as jnp
 
-from fast_td3.environments.mujoco_playground_env import make_env
 from fast_td3.fast_td3_utils import EmpiricalNormalization
-from .ppo import ActorCritic, calculate_network_norms
-from .ppo_utils import RolloutBuffer, save_ppo_params
-# from .spatial_coverage import SpatialCoverageMetric
+from pbt_baseline.ppo import ActorCritic, calculate_network_norms
+from ppo.ppo_utils import RolloutBuffer, save_ppo_params
+# from ppo.spatial_coverage import SpatialCoverageMetric
 from tensordict import TensorDict
+
+# PBT imports
+from pbt_baseline.pbt import PbtObserver, initial_pbt_check
 
 import os
 import sys
@@ -41,6 +43,10 @@ def main():
     args = get_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    # Check for PBT restart
+    if args.pbt_enabled:
+        initial_pbt_check(args)
+
     amp_enabled = args.amp and torch.cuda.is_available()
     amp_device_type = "cuda" if torch.cuda.is_available() else "cpu"
     amp_dtype = torch.bfloat16 if args.amp_dtype == "bf16" else torch.float16
@@ -51,6 +57,9 @@ def main():
     np.random.seed(args.seed)
 
     run_name = f"{args.env_name}__{args.exp_name}__{args.seed}"
+    if args.pbt_enabled:
+        run_name += f"__p{args.pbt_policy_idx}"
+    
     os.makedirs(args.output_dir, exist_ok=True)
 
     # Initialize wandb if requested
@@ -64,7 +73,7 @@ def main():
             save_code=True,
         )
 
-    print("Starting PPO training")
+    print("Starting PPO training with PBT baseline")
     print(f"Device: {device}")
     print(f"Environment: {args.env_name}")
     print(f"Total timesteps: {args.total_timesteps:,}")
@@ -75,33 +84,76 @@ def main():
     print(f"Evaluation interval: {args.eval_interval}")
     print(f"Number of eval environments: {args.num_eval_envs}")
     print(f"Using wandb: {args.use_wandb}")
+    print(f"PBT enabled: {args.pbt_enabled}")
     print("-" * 60)
 
-    # Create training environments
-    envs, _, _ = make_env(
-        args.env_name,
-        seed=args.seed,
-        num_envs=args.num_envs,
-        num_eval_envs=1,
-        device_rank=0,
-    )
+    print("\nCreating environments...")
+    if args.env_name.startswith("h1hand-") or args.env_name.startswith("h1-"):
+        from pbt_baseline.environments.humanoid_bench_env import HumanoidBenchEnv
 
-    # Create separate evaluation environments
-    eval_envs, _, render_env = make_env(
-        args.env_name,
-        seed=args.seed + 42,
-        num_envs=args.num_eval_envs,
-        num_eval_envs=1,
-        device_rank=0,
-    )
+        env_type = "humanoid_bench"
+        envs = HumanoidBenchEnv(args.env_name, args.num_envs, device=device)
+        eval_envs = envs
+        render_env = HumanoidBenchEnv(
+            args.env_name, 1, render_mode="rgb_array", device=device
+        )
+        print(f"Humanoid bench environment created")
+    elif args.env_name.startswith("Isaac-"):
+        from pbt_baseline.environments.isaaclab_env import IsaacLabEnv
+
+        env_type = "isaaclab"
+        envs = IsaacLabEnv(
+            args.env_name,
+            device.type,
+            args.num_envs,
+            args.seed,
+            action_bounds=args.action_bounds,
+        )
+        print(f"Isaac lab environment created")
+        eval_envs = envs
+        render_env = envs
+    elif args.env_name.startswith("MTBench-"):
+        from pbt_baseline.environments.mtbench_env import MTBenchEnv
+
+        env_name = "-".join(args.env_name.split("-")[1:])
+        env_type = "mtbench"
+        envs = MTBenchEnv(env_name, args.device_rank, args.num_envs, args.seed)
+        print(f"MTBench environment created")
+        eval_envs = envs
+        render_env = envs
+    else:
+        from pbt_baseline.environments.mujoco_playground_env import make_env
+
+        # TODO: Check if re-using same envs for eval could reduce memory usage
+        env_type = "mujoco_playground"
+        envs, eval_envs, render_env = make_env(
+            args.env_name,
+            args.seed,
+            args.num_envs,
+            args.num_eval_envs,
+            args.device_rank,
+            use_tuned_reward=args.use_tuned_reward,
+            use_domain_randomization=args.use_domain_randomization,
+            use_push_randomization=args.use_push_randomization,
+        )
+        print(f"Mujoco playground environment created")
 
     obs = envs.reset()
     n_obs = envs.num_obs if isinstance(envs.num_obs, int) else envs.num_obs[0]
     n_act = envs.num_actions
 
+    print(f"\nInitializing agent...")
+    print(f"Observation space: {n_obs} dimensions")
+    print(f"Action space: {n_act} dimensions")
     policy = ActorCritic(n_obs, n_act, args.hidden_dim, device=device)
     optimizer = optim.Adam(policy.parameters(), lr=args.learning_rate)
     normalizer = EmpiricalNormalization(shape=n_obs, device=device)
+
+    # Initialize PBT observer
+    pbt_observer = None
+    if args.pbt_enabled:
+        pbt_observer = PbtObserver(args)
+        pbt_observer.after_init()
 
     if args.compile:
         policy_act = torch.compile(policy.act)
@@ -193,47 +245,8 @@ def main():
         normalizer.train()
         return episode_returns.mean().item(), episode_lengths.mean().item()
 
-    def render_with_rollout():
-        normalizer.eval()
-        env_type = args.env_type
-
-        # Quick rollout for rendering
-        if env_type == "humanoid_bench":
-            obs = render_env.reset()
-            renders = [render_env.render()]
-        elif env_type == "isaaclab":
-            raise NotImplementedError(
-                "We don't support rendering for IsaacLab environments"
-            )
-        else:
-            obs = render_env.reset()
-            render_env.state.info["command"] = jnp.array([[1.0, 0.0, 0.0]])
-            renders = [render_env.state]
-        for i in range(render_env.max_episode_steps):
-            with torch.no_grad(), autocast(
-                device_type=amp_device_type, dtype=amp_dtype, enabled=amp_enabled
-            ):
-                norm_obs = eval_normalize_obs(obs)
-                action, _, _ = policy_act(norm_obs)
-            next_obs, _, done, _ = render_env.step(action)
-            if env_type == "mujoco_playground":
-                render_env.state.info["command"] = jnp.array([[1.0, 0.0, 0.0]])
-            if i % 2 == 0:
-                if env_type == "humanoid_bench":
-                    renders.append(render_env.render())
-                else:
-                    renders.append(render_env.state)
-            if done.any():
-                break
-            obs = next_obs
-
-        if env_type == "mujoco_playground":
-            renders = render_env.render_trajectory(renders)
-
-        normalizer.train()
-        return renders
-
-    print("Starting training loop...")
+    print("\nStarting training loop...")
+    print("=" * 60)
 
     # Main training loop with progress bar
     with tqdm(
@@ -248,29 +261,18 @@ def main():
                 args.eval_interval > 0
                 and global_step - last_eval_step >= args.eval_interval
             ):
-                print(f"\nEvaluating at global step {global_step}")
+                print(f"\n{'='*60}")
+                print(f"Evaluating agent at step {global_step:,}...")
                 eval_avg_return, eval_avg_length = evaluate()
                 eval_returns.append(eval_avg_return)
                 eval_lengths.append(eval_avg_length)
                 last_eval_step = global_step  # Update last evaluation step
                 print(
-                    f"*** Evaluation - Avg Return: {eval_avg_return:.3f}, Avg Length: {eval_avg_length:.1f}****"
+                    f"Evaluation complete - Avg Return: {eval_avg_return:.3f}, Avg Length: {eval_avg_length:.1f}"
                 )
+                print("=" * 60)
 
-                # Render video if requested
-                # print(f"Rendering video at global step {global_step}")
-                # renders = render_with_rollout()
                 if args.use_wandb:
-                    #     wandb.log(
-                    #         {
-                    #             "render_video": wandb.Video(
-                    #                 np.array(renders).transpose(0, 3, 1, 2),  # Convert to (T, C, H, W) format
-                    #                 fps=30,
-                    #                 format="gif",
-                    #             )
-                    #         },
-                    #         step=global_step,
-                    #     )
                     # log the evaluation results
                     wandb.log(
                         {
@@ -281,6 +283,7 @@ def main():
                     )
 
             # Data collection phase
+            print(f"\nCollecting data - {args.rollout_length} steps across {args.num_envs} environments...")
             rollout_start_time = time.time()
             for step in tqdm(
                 range(args.rollout_length), desc="Data Collection", leave=False
@@ -315,10 +318,18 @@ def main():
                             num_episodes += 1
                             current_episode_reward[env_idx] = 0
                             current_episode_length[env_idx] = 0
+                            
+                            # Update PBT observer with episode reward
+                            if pbt_observer is not None:
+                                pbt_observer.process_episode_reward(
+                                    current_episode_reward[env_idx].item()
+                                )
 
             rollout_time = time.time() - rollout_start_time
+            print(f"Data collection complete - Time taken: {rollout_time:.2f}s")
 
             # Compute advantages - handle each environment separately
+            print("\nComputing advantages and preparing for policy update...")
             with torch.no_grad(), autocast(
                 device_type=amp_device_type, dtype=amp_dtype, enabled=amp_enabled
             ):
@@ -329,6 +340,7 @@ def main():
             )
 
             # Policy update phase
+            print(f"\nUpdating policy for {args.update_epochs} epochs...")
             update_start_time = time.time()
             epoch_policy_loss = 0
             epoch_value_loss = 0
@@ -356,7 +368,7 @@ def main():
                         ratio = (new_logp - b_logp).exp()
                         pg_loss1 = -b_adv * ratio
                         pg_loss2 = -b_adv * torch.clamp(
-                            ratio, 1 - args.clip_eps, 1 + args.clip_eps
+                            ratio, 1 - args.clip_coeff, 1 + args.clip_coeff
                         )
                         policy_loss = torch.max(pg_loss1, pg_loss2).mean()
 
@@ -366,8 +378,8 @@ def main():
 
                         loss = (
                             policy_loss
-                            + args.vf_coef * value_loss
-                            - args.ent_coef * entropy
+                            + args.vf_coeff * value_loss
+                            - args.ent_coeff * entropy
                         )
                     optimizer.zero_grad()
                     scaler.scale(loss).backward()
@@ -393,6 +405,7 @@ def main():
                     epoch_updates += 1
 
             update_time = time.time() - update_start_time
+            print(f"Policy update complete - Time taken: {update_time:.2f}s")
 
             # Update coverage metric after each policy update
             # current_coverage = coverage_metric.update_coverage()
@@ -422,7 +435,6 @@ def main():
             )
 
             # Logging
-            # if global_step % args.log_interval == 0 or global_step >= args.total_timesteps:
             current_time = time.time()
             elapsed_time = current_time - start_time
             time_since_last_log = current_time - last_log_time
@@ -497,7 +509,7 @@ def main():
                 and global_step > 0
                 and global_step - last_save_step >= args.save_interval
             ):
-                print(f"Saving model at global step {global_step}")
+                print(f"\nSaving checkpoint at step {global_step:,}...")
                 last_save_step = global_step  # Update last save step
                 save_ppo_params(
                     global_step,
@@ -506,17 +518,26 @@ def main():
                     args,
                     f"{args.output_dir}/{run_name}_{global_step}.pt",
                 )
+                print("Checkpoint saved successfully")
+
+            # PBT step
+            if pbt_observer is not None and pbt_observer.should_perform_pbt_step(global_step):
+                print("\nPerforming PBT step...")
+                pbt_observer.perform_pbt_step(global_step, None, run_name)  # Pass None for agent since we use policy directly
+                print("PBT step complete")
 
             last_log_time = current_time
 
     total_time = time.time() - start_time
-    print(f"\nTraining completed!")
+    print(f"\n{'='*60}")
+    print("Training completed!")
     print(f"Total training time: {total_time:.1f}s")
     print(f"Final stats: {num_episodes} episodes, {global_step:,} timesteps")
     print(f"Average FPS: {global_step/total_time:.1f}")
 
     # Print final evaluation results
     if eval_returns:
+        print("\nFinal Evaluation Results:")
         print(f"Final evaluation return: {eval_returns[-1]:.3f}")
         print(f"Best evaluation return: {max(eval_returns):.3f}")
 
@@ -536,32 +557,6 @@ def main():
     #     print(f"Coverage Growth: {coverage_summary['coverage_growth']:.4f}")
     # print(f"{'='*60}")
 
-    # Generate final visualization
-    # try:
-    #     output_dir = args.output_dir
-    #     coverage_viz_path = f"{output_dir}/{run_name}_spatial_coverage_final.png"
-        
-    #     print(f"Generating spatial coverage visualization: {coverage_viz_path}")
-    #     fig = coverage_metric.visualize_coverage(
-    #         title=f"Final Spatial Coverage - {run_name}",
-    #         save_path=coverage_viz_path
-    #     )
-    #     if fig is not None:
-    #         import matplotlib
-    #         matplotlib.pyplot.close(fig)  # Close to free memory
-    #         print(f"Spatial coverage visualization saved to: {coverage_viz_path}")
-    #     else:
-    #         print("Warning: Could not generate spatial coverage visualization")
-    # except Exception as e:
-    #     print(f"Warning: Failed to generate coverage visualization: {e}")
-
-    # Save final coverage data with num_envs in filename
-    # try:
-    #     coverage_save_path = f"{args.output_dir}/{run_name}"
-    #     coverage_metric.save_final_coverage(coverage_save_path, args.num_envs)
-    # except Exception as e:
-    #     print(f"Warning: Failed to save final coverage data: {e}")
-
     # Log final results to wandb
     if args.use_wandb:
         final_logs = {
@@ -579,16 +574,9 @@ def main():
         #     final_logs["coverage_growth"] = coverage_summary['coverage_growth']
             
         wandb.log(final_logs, step=global_step)
-        
-        # Upload coverage visualization if it exists
-        # try:
-        #     if 'coverage_viz_path' in locals() and os.path.exists(coverage_viz_path):
-        #         wandb.log({"spatial_coverage_final_plot": wandb.Image(coverage_viz_path)}, step=global_step)
-        # except Exception as e:
-        #     print(f"Warning: Failed to upload coverage visualization to wandb: {e}")
-            
         wandb.finish()
 
+    print("\nSaving final model checkpoint...")
     save_ppo_params(
         global_step,
         policy,
@@ -596,6 +584,8 @@ def main():
         args,
         f"{args.output_dir}/{run_name}_final.pt",
     )
+    print("Final checkpoint saved successfully")
+    print("=" * 60)
 
 
 if __name__ == "__main__":
