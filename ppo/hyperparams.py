@@ -11,9 +11,9 @@ class BaseArgs:
     """Identifier of the environment."""
     env_type: str = "mujoco_playground"
     """Type of the environment. Currently only MuJoCo Playground is supported."""
-    total_timesteps: int = 200000000
+    total_timesteps: int = 30000000
     """Total timesteps to train for."""
-    num_envs: int = 2048
+    num_envs: int = 128
     """Number of parallel environments."""
     learning_rate: float = 3e-4
     """Learning rate for the optimizer."""
@@ -37,11 +37,11 @@ class BaseArgs:
     """Hidden dimension of policy and value networks."""
     log_interval: int = 10000
     """Interval (in steps) between logging to stdout."""
-    eval_interval: int = 100000
+    eval_interval: int = 500000
     """Evaluation interval in environment steps."""
-    num_eval_envs: int = 10
+    num_eval_envs: int = 16
     """Number of parallel evaluation environments."""
-    use_wandb: bool = False
+    use_wandb: bool = True
     """Enable logging to Weights & Biases."""
     project: str = "rl_scratch"
     """wandb project name."""

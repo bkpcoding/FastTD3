@@ -1,5 +1,6 @@
 """Minimal PPO training loop for FastTD3 environments."""
 
+import logging
 from .hyperparams import get_args
 import torch
 import torch.optim as optim
@@ -11,7 +12,6 @@ from tqdm import tqdm
 import numpy as np
 import jax.numpy as jnp
 
-from fast_td3.environments.mujoco_playground_env import make_env
 from fast_td3.fast_td3_utils import EmpiricalNormalization
 from .ppo import ActorCritic, calculate_network_norms
 from .ppo_utils import RolloutBuffer, save_ppo_params
@@ -40,6 +40,16 @@ torch._dynamo.config.suppress_errors = True
 def main():
     args = get_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # Setup logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.StreamHandler(),
+        ]
+    )
+    logger = logging.getLogger(__name__)
 
     amp_enabled = args.amp and torch.cuda.is_available()
     amp_device_type = "cuda" if torch.cuda.is_available() else "cpu"
@@ -64,36 +74,64 @@ def main():
             save_code=True,
         )
 
-    print("Starting PPO training")
-    print(f"Device: {device}")
-    print(f"Environment: {args.env_name}")
-    print(f"Total timesteps: {args.total_timesteps:,}")
-    print(f"Number of environments: {args.num_envs}")
-    print(f"Rollout length: {args.rollout_length}")
-    print(f"Hidden dimension: {args.hidden_dim}")
-    print(f"Learning rate: {args.learning_rate}")
-    print(f"Evaluation interval: {args.eval_interval}")
-    print(f"Number of eval environments: {args.num_eval_envs}")
-    print(f"Using wandb: {args.use_wandb}")
-    print("-" * 60)
+    logger.info("Starting PPO training")
+    logger.info(f"Device: {device}")
+    logger.info(f"Environment: {args.env_name}")
+    logger.info(f"Total timesteps: {args.total_timesteps:,}")
+    logger.info(f"Number of environments: {args.num_envs}")
+    logger.info(f"Rollout length: {args.rollout_length}")
+    logger.info(f"Hidden dimension: {args.hidden_dim}")
+    logger.info(f"Learning rate: {args.learning_rate}")
+    logger.info(f"Evaluation interval: {args.eval_interval}")
+    logger.info(f"Number of eval environments: {args.num_eval_envs}")
+    logger.info(f"Using wandb: {args.use_wandb}")
+    logger.info("-" * 60)
 
-    # Create training environments
-    envs, _, _ = make_env(
-        args.env_name,
-        seed=args.seed,
-        num_envs=args.num_envs,
-        num_eval_envs=1,
-        device_rank=0,
-    )
+    if args.env_name.startswith("h1hand-") or args.env_name.startswith("h1-"):
+        from fast_td3.environments.humanoid_bench_env import HumanoidBenchEnv
 
-    # Create separate evaluation environments
-    eval_envs, _, render_env = make_env(
-        args.env_name,
-        seed=args.seed + 42,
-        num_envs=args.num_eval_envs,
-        num_eval_envs=1,
-        device_rank=0,
-    )
+        env_type = "humanoid_bench"
+        envs = HumanoidBenchEnv(args.env_name, args.num_envs, device=device)
+        eval_envs = envs
+        render_env = HumanoidBenchEnv(
+            args.env_name, 1, render_mode="rgb_array", device=device
+        )
+    elif args.env_name.startswith("Isaac-"):
+        from fast_td3.environments.isaaclab_env import IsaacLabEnv
+
+        env_type = "isaaclab"
+        envs = IsaacLabEnv(
+            args.env_name,
+            device.type,
+            args.num_envs,
+            args.seed,
+            action_bounds=args.action_bounds,
+        )
+        eval_envs = envs
+        render_env = envs
+    elif args.env_name.startswith("MTBench-"):
+        from fast_td3.environments.mtbench_env import MTBenchEnv
+
+        env_name = "-".join(args.env_name.split("-")[1:])
+        env_type = "mtbench"
+        envs = MTBenchEnv(env_name, args.device_rank, args.num_envs, args.seed)
+        eval_envs = envs
+        render_env = envs
+    else:
+        from fast_td3.environments.mujoco_playground_env import make_env
+
+        # TODO: Check if re-using same envs for eval could reduce memory usage
+        env_type = "mujoco_playground"
+        envs, eval_envs, render_env = make_env(
+            args.env_name,
+            args.seed,
+            args.num_envs,
+            args.num_eval_envs,
+            args.device_rank,
+            use_tuned_reward=args.use_tuned_reward,
+            use_domain_randomization=args.use_domain_randomization,
+            use_push_randomization=args.use_push_randomization,
+        )
 
     obs = envs.reset()
     n_obs = envs.num_obs if isinstance(envs.num_obs, int) else envs.num_obs[0]
@@ -233,7 +271,7 @@ def main():
         normalizer.train()
         return renders
 
-    print("Starting training loop...")
+    logger.info("Starting training loop...")
 
     # Main training loop with progress bar
     with tqdm(
@@ -248,12 +286,12 @@ def main():
                 args.eval_interval > 0
                 and global_step - last_eval_step >= args.eval_interval
             ):
-                print(f"\nEvaluating at global step {global_step}")
+                logger.info(f"Evaluating at global step {global_step}")
                 eval_avg_return, eval_avg_length = evaluate()
                 eval_returns.append(eval_avg_return)
                 eval_lengths.append(eval_avg_length)
                 last_eval_step = global_step  # Update last evaluation step
-                print(
+                logger.info(
                     f"*** Evaluation - Avg Return: {eval_avg_return:.3f}, Avg Length: {eval_avg_length:.1f}****"
                 )
 
@@ -282,9 +320,7 @@ def main():
 
             # Data collection phase
             rollout_start_time = time.time()
-            for step in tqdm(
-                range(args.rollout_length), desc="Data Collection", leave=False
-            ):
+            for step in range(args.rollout_length):
                 with torch.no_grad(), autocast(
                     device_type=amp_device_type, dtype=amp_dtype, enabled=amp_enabled
                 ):
@@ -335,9 +371,7 @@ def main():
             epoch_entropy = 0
             epoch_updates = 0
 
-            for epoch in tqdm(
-                range(args.update_epochs), desc="Policy Updates", leave=False
-            ):
+            for epoch in range(args.update_epochs):
                 for b_obs, b_actions, b_logp, b_returns, b_adv in buffer.get_batches(
                     args.batch_size
                 ):
@@ -441,29 +475,29 @@ def main():
                 else 0
             )
 
-            print(
-                f"\nTraining Progress - Step {global_step:,}/{args.total_timesteps:,} ({progress:.1f}%)"
+            logger.debug(
+                f"Training Progress - Step {global_step:,}/{args.total_timesteps:,} ({progress:.1f}%)"
             )
-            print(
+            logger.debug(
                 f"Elapsed: {elapsed_time:.1f}s | FPS: {fps:.1f} | Time since last log: {time_since_last_log:.1f}s"
             )
-            print(
+            logger.debug(
                 f"Episode Stats: Avg Reward: {avg_reward:.3f} | Avg Length: {avg_length:.1f} | Episodes: {num_episodes}"
             )
-            print(
+            logger.debug(
                 f"Loss Stats: Policy: {avg_policy_loss:.6f} | Value: {avg_value_loss:.6f} | Entropy: {avg_entropy:.6f}"
             )
             # print(f"Coverage: {current_coverage:.4f} | Occupied Cells: {len(coverage_metric.occupied_cells)}/{coverage_metric.grid_size**2}")
-            print(f"Timing: Rollout: {rollout_time:.3f}s | Update: {update_time:.3f}s")
-            print(f"Epoch {epoch+1}/{args.update_epochs} | Updates: {epoch_updates}")
+            logger.debug(f"Timing: Rollout: {rollout_time:.3f}s | Update: {update_time:.3f}s")
+            logger.debug(f"Epoch {epoch+1}/{args.update_epochs} | Updates: {epoch_updates}")
 
             # Add evaluation results to logging if available
             if eval_avg_return is not None:
-                print(
+                logger.info(
                     f"Evaluation: Avg Return: {eval_avg_return:.3f} | Avg Length: {eval_avg_length:.1f}"
                 )
 
-            print("-" * 60)
+            logger.debug("-" * 60)
 
             # Log to wandb if enabled
             if args.use_wandb:
@@ -497,7 +531,7 @@ def main():
                 and global_step > 0
                 and global_step - last_save_step >= args.save_interval
             ):
-                print(f"Saving model at global step {global_step}")
+                logger.info(f"Saving model at global step {global_step}")
                 last_save_step = global_step  # Update last save step
                 save_ppo_params(
                     global_step,
@@ -510,15 +544,15 @@ def main():
             last_log_time = current_time
 
     total_time = time.time() - start_time
-    print(f"\nTraining completed!")
-    print(f"Total training time: {total_time:.1f}s")
-    print(f"Final stats: {num_episodes} episodes, {global_step:,} timesteps")
-    print(f"Average FPS: {global_step/total_time:.1f}")
+    logger.info(f"Training completed!")
+    logger.info(f"Total training time: {total_time:.1f}s")
+    logger.info(f"Final stats: {num_episodes} episodes, {global_step:,} timesteps")
+    logger.info(f"Average FPS: {global_step/total_time:.1f}")
 
     # Print final evaluation results
     if eval_returns:
-        print(f"Final evaluation return: {eval_returns[-1]:.3f}")
-        print(f"Best evaluation return: {max(eval_returns):.3f}")
+        logger.info(f"Final evaluation return: {eval_returns[-1]:.3f}")
+        logger.info(f"Best evaluation return: {max(eval_returns):.3f}")
 
     # Print final spatial coverage results
     # final_coverage = coverage_metric.get_current_coverage()
