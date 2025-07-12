@@ -1,5 +1,6 @@
 """Minimal PPO training loop for FastTD3 environments with PBT baseline."""
 
+import logging
 from pbt_baseline.hyperparams import get_args
 import torch
 import torch.optim as optim
@@ -42,6 +43,16 @@ torch._dynamo.config.suppress_errors = True
 def main():
     args = get_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # Setup logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.StreamHandler(),
+        ]
+    )
+    logger = logging.getLogger(__name__)
 
     # Check for PBT restart
     if args.pbt_enabled:
@@ -73,21 +84,21 @@ def main():
             save_code=True,
         )
 
-    print("Starting PPO training with PBT baseline")
-    print(f"Device: {device}")
-    print(f"Environment: {args.env_name}")
-    print(f"Total timesteps: {args.total_timesteps:,}")
-    print(f"Number of environments: {args.num_envs}")
-    print(f"Rollout length: {args.rollout_length}")
-    print(f"Hidden dimension: {args.hidden_dim}")
-    print(f"Learning rate: {args.learning_rate}")
-    print(f"Evaluation interval: {args.eval_interval}")
-    print(f"Number of eval environments: {args.num_eval_envs}")
-    print(f"Using wandb: {args.use_wandb}")
-    print(f"PBT enabled: {args.pbt_enabled}")
-    print("-" * 60)
+    logger.info("Starting PPO training with PBT baseline")
+    logger.info(f"Device: {device}")
+    logger.info(f"Environment: {args.env_name}")
+    logger.info(f"Total timesteps: {args.total_timesteps:,}")
+    logger.info(f"Number of environments: {args.num_envs}")
+    logger.info(f"Rollout length: {args.rollout_length}")
+    logger.info(f"Hidden dimension: {args.hidden_dim}")
+    logger.info(f"Learning rate: {args.learning_rate}")
+    logger.info(f"Evaluation interval: {args.eval_interval}")
+    logger.info(f"Number of eval environments: {args.num_eval_envs}")
+    logger.info(f"Using wandb: {args.use_wandb}")
+    logger.info(f"PBT enabled: {args.pbt_enabled}")
+    logger.info("-" * 60)
 
-    print("\nCreating environments...")
+    logger.info("Creating environments...")
     if args.env_name.startswith("h1hand-") or args.env_name.startswith("h1-"):
         from pbt_baseline.environments.humanoid_bench_env import HumanoidBenchEnv
 
@@ -97,7 +108,7 @@ def main():
         render_env = HumanoidBenchEnv(
             args.env_name, 1, render_mode="rgb_array", device=device
         )
-        print(f"Humanoid bench environment created")
+        logger.info("Humanoid bench environment created")
     elif args.env_name.startswith("Isaac-"):
         from pbt_baseline.environments.isaaclab_env import IsaacLabEnv
 
@@ -109,7 +120,7 @@ def main():
             args.seed,
             action_bounds=args.action_bounds,
         )
-        print(f"Isaac lab environment created")
+        logger.info("Isaac lab environment created")
         eval_envs = envs
         render_env = envs
     elif args.env_name.startswith("MTBench-"):
@@ -118,7 +129,7 @@ def main():
         env_name = "-".join(args.env_name.split("-")[1:])
         env_type = "mtbench"
         envs = MTBenchEnv(env_name, args.device_rank, args.num_envs, args.seed)
-        print(f"MTBench environment created")
+        logger.info("MTBench environment created")
         eval_envs = envs
         render_env = envs
     else:
@@ -136,15 +147,15 @@ def main():
             use_domain_randomization=args.use_domain_randomization,
             use_push_randomization=args.use_push_randomization,
         )
-        print(f"Mujoco playground environment created")
+        logger.info("Mujoco playground environment created")
 
     obs = envs.reset()
     n_obs = envs.num_obs if isinstance(envs.num_obs, int) else envs.num_obs[0]
     n_act = envs.num_actions
 
-    print(f"\nInitializing agent...")
-    print(f"Observation space: {n_obs} dimensions")
-    print(f"Action space: {n_act} dimensions")
+    logger.info("Initializing agent...")
+    logger.info(f"Observation space: {n_obs} dimensions")
+    logger.info(f"Action space: {n_act} dimensions")
     policy = ActorCritic(n_obs, n_act, args.hidden_dim, device=device)
     optimizer = optim.Adam(policy.parameters(), lr=args.learning_rate)
     normalizer = EmpiricalNormalization(shape=n_obs, device=device)
@@ -245,12 +256,13 @@ def main():
         normalizer.train()
         return episode_returns.mean().item(), episode_lengths.mean().item()
 
-    print("\nStarting training loop...")
-    print("=" * 60)
+    logger.info("Starting training loop...")
+    logger.info("=" * 60)
 
     # Main training loop with progress bar
+    policy_desc = f"Policy {args.pbt_policy_idx}" if args.pbt_enabled else "Training"
     with tqdm(
-        total=args.total_timesteps, desc="Training Progress", unit="steps"
+        total=args.total_timesteps, desc=f"{policy_desc} Progress", unit="steps", position=args.pbt_policy_idx if args.pbt_enabled else 0
     ) as pbar:
         while global_step < args.total_timesteps:
             logs_dict = TensorDict()
@@ -261,16 +273,20 @@ def main():
                 args.eval_interval > 0
                 and global_step - last_eval_step >= args.eval_interval
             ):
-                print(f"\n{'='*60}")
-                print(f"Evaluating agent at step {global_step:,}...")
+                logger.info(f"\n{'='*60}")
+                logger.info(f"Evaluating agent at step {global_step:,}...")
                 eval_avg_return, eval_avg_length = evaluate()
                 eval_returns.append(eval_avg_return)
                 eval_lengths.append(eval_avg_length)
                 last_eval_step = global_step  # Update last evaluation step
-                print(
+                logger.info(
                     f"Evaluation complete - Avg Return: {eval_avg_return:.3f}, Avg Length: {eval_avg_length:.1f}"
                 )
-                print("=" * 60)
+                logger.info("=" * 60)
+
+                # Update PBT observer with evaluation reward
+                if pbt_observer is not None:
+                    pbt_observer.process_eval_reward(eval_avg_return)
 
                 if args.use_wandb:
                     # log the evaluation results
@@ -283,11 +299,9 @@ def main():
                     )
 
             # Data collection phase
-            print(f"\nCollecting data - {args.rollout_length} steps across {args.num_envs} environments...")
+            logger.debug(f"Collecting data - {args.rollout_length} steps across {args.num_envs} environments...")
             rollout_start_time = time.time()
-            for step in tqdm(
-                range(args.rollout_length), desc="Data Collection", leave=False
-            ):
+            for step in range(args.rollout_length):
                 with torch.no_grad(), autocast(
                     device_type=amp_device_type, dtype=amp_dtype, enabled=amp_enabled
                 ):
@@ -326,10 +340,10 @@ def main():
                                 )
 
             rollout_time = time.time() - rollout_start_time
-            print(f"Data collection complete - Time taken: {rollout_time:.2f}s")
+            logger.debug(f"Data collection complete - Time taken: {rollout_time:.2f}s")
 
             # Compute advantages - handle each environment separately
-            print("\nComputing advantages and preparing for policy update...")
+            logger.debug("Computing advantages and preparing for policy update...")
             with torch.no_grad(), autocast(
                 device_type=amp_device_type, dtype=amp_dtype, enabled=amp_enabled
             ):
@@ -340,16 +354,14 @@ def main():
             )
 
             # Policy update phase
-            print(f"\nUpdating policy for {args.update_epochs} epochs...")
+            logger.debug(f"Updating policy for {args.update_epochs} epochs...")
             update_start_time = time.time()
             epoch_policy_loss = 0
             epoch_value_loss = 0
             epoch_entropy = 0
             epoch_updates = 0
 
-            for epoch in tqdm(
-                range(args.update_epochs), desc="Policy Updates", leave=False
-            ):
+            for epoch in range(args.update_epochs):
                 for b_obs, b_actions, b_logp, b_returns, b_adv in buffer.get_batches(
                     args.batch_size
                 ):
@@ -405,7 +417,7 @@ def main():
                     epoch_updates += 1
 
             update_time = time.time() - update_start_time
-            print(f"Policy update complete - Time taken: {update_time:.2f}s")
+            logger.debug(f"Policy update complete - Time taken: {update_time:.2f}s")
 
             # Update coverage metric after each policy update
             # current_coverage = coverage_metric.update_coverage()
@@ -431,7 +443,7 @@ def main():
             )
 
             pbar.set_description(
-                f"Training ({progress:.1f}%) | Reward: {avg_reward:.3f}{eval_info} | Policy Loss: {avg_policy_loss:.6f} | Episodes: {num_episodes}"
+                f"{policy_desc} ({progress:.1f}%) | Reward: {avg_reward:.3f}{eval_info} | Policy Loss: {avg_policy_loss:.6f} | Episodes: {num_episodes}"
             )
 
             # Logging
@@ -453,29 +465,29 @@ def main():
                 else 0
             )
 
-            print(
-                f"\nTraining Progress - Step {global_step:,}/{args.total_timesteps:,} ({progress:.1f}%)"
+            logger.debug(
+                f"Training Progress - Step {global_step:,}/{args.total_timesteps:,} ({progress:.1f}%)"
             )
-            print(
+            logger.debug(
                 f"Elapsed: {elapsed_time:.1f}s | FPS: {fps:.1f} | Time since last log: {time_since_last_log:.1f}s"
             )
-            print(
+            logger.debug(
                 f"Episode Stats: Avg Reward: {avg_reward:.3f} | Avg Length: {avg_length:.1f} | Episodes: {num_episodes}"
             )
-            print(
+            logger.debug(
                 f"Loss Stats: Policy: {avg_policy_loss:.6f} | Value: {avg_value_loss:.6f} | Entropy: {avg_entropy:.6f}"
             )
             # print(f"Coverage: {current_coverage:.4f} | Occupied Cells: {len(coverage_metric.occupied_cells)}/{coverage_metric.grid_size**2}")
-            print(f"Timing: Rollout: {rollout_time:.3f}s | Update: {update_time:.3f}s")
-            print(f"Epoch {epoch+1}/{args.update_epochs} | Updates: {epoch_updates}")
+            logger.debug(f"Timing: Rollout: {rollout_time:.3f}s | Update: {update_time:.3f}s")
+            logger.debug(f"Epoch {epoch+1}/{args.update_epochs} | Updates: {epoch_updates}")
 
             # Add evaluation results to logging if available
             if eval_avg_return is not None:
-                print(
+                logger.info(
                     f"Evaluation: Avg Return: {eval_avg_return:.3f} | Avg Length: {eval_avg_length:.1f}"
                 )
 
-            print("-" * 60)
+            logger.debug("-" * 60)
 
             # Log to wandb if enabled
             if args.use_wandb:
@@ -509,7 +521,7 @@ def main():
                 and global_step > 0
                 and global_step - last_save_step >= args.save_interval
             ):
-                print(f"\nSaving checkpoint at step {global_step:,}...")
+                logger.info(f"Saving checkpoint at step {global_step:,}...")
                 last_save_step = global_step  # Update last save step
                 save_ppo_params(
                     global_step,
@@ -518,28 +530,37 @@ def main():
                     args,
                     f"{args.output_dir}/{run_name}_{global_step}.pt",
                 )
-                print("Checkpoint saved successfully")
+                logger.info("Checkpoint saved successfully")
 
             # PBT step
             if pbt_observer is not None and pbt_observer.should_perform_pbt_step(global_step):
-                print("\nPerforming PBT step...")
-                pbt_observer.perform_pbt_step(global_step, None, run_name)  # Pass None for agent since we use policy directly
-                print("PBT step complete")
+                logger.info("Performing PBT step...")
+                
+                # Evaluate current policy to ensure fresh evaluation results for PBT comparison
+                logger.info("Evaluating current policy for PBT comparison...")
+                current_eval_return, current_eval_length = evaluate()
+                
+                # Update PBT observer with fresh evaluation reward
+                pbt_observer.process_eval_reward(current_eval_return)
+                logger.info(f"Current policy evaluation for PBT - Return: {current_eval_return:.3f}, Length: {current_eval_length:.1f}")
+                
+                pbt_observer.perform_pbt_step(global_step, policy, run_name)
+                logger.info("PBT step complete")
 
             last_log_time = current_time
 
     total_time = time.time() - start_time
-    print(f"\n{'='*60}")
-    print("Training completed!")
-    print(f"Total training time: {total_time:.1f}s")
-    print(f"Final stats: {num_episodes} episodes, {global_step:,} timesteps")
-    print(f"Average FPS: {global_step/total_time:.1f}")
+    logger.info(f"\n{'='*60}")
+    logger.info("Training completed!")
+    logger.info(f"Total training time: {total_time:.1f}s")
+    logger.info(f"Final stats: {num_episodes} episodes, {global_step:,} timesteps")
+    logger.info(f"Average FPS: {global_step/total_time:.1f}")
 
     # Print final evaluation results
     if eval_returns:
-        print("\nFinal Evaluation Results:")
-        print(f"Final evaluation return: {eval_returns[-1]:.3f}")
-        print(f"Best evaluation return: {max(eval_returns):.3f}")
+        logger.info("Final Evaluation Results:")
+        logger.info(f"Final evaluation return: {eval_returns[-1]:.3f}")
+        logger.info(f"Best evaluation return: {max(eval_returns):.3f}")
 
     # Print final spatial coverage results
     # final_coverage = coverage_metric.get_current_coverage()
@@ -576,7 +597,7 @@ def main():
         wandb.log(final_logs, step=global_step)
         wandb.finish()
 
-    print("\nSaving final model checkpoint...")
+    logger.info("Saving final model checkpoint...")
     save_ppo_params(
         global_step,
         policy,
@@ -584,8 +605,8 @@ def main():
         args,
         f"{args.output_dir}/{run_name}_final.pt",
     )
-    print("Final checkpoint saved successfully")
-    print("=" * 60)
+    logger.info("Final checkpoint saved successfully")
+    logger.info("=" * 60)
 
 
 if __name__ == "__main__":

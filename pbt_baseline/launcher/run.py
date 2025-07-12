@@ -59,13 +59,11 @@ def main():
     except ImportError as exc:
         print(f"Could not import the run module {exc}")
         return 1
-
     run_description = run_module.RUN_DESCRIPTION
     run_description.experiment_suffix = launcher_cfg.experiment_suffix
 
     # Create train directory
     os.makedirs(launcher_cfg.train_dir, exist_ok=True)
-
     # Run experiments based on backend
     if launcher_cfg.backend == "processes":
         success = run(run_description, launcher_cfg)

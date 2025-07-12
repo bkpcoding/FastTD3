@@ -11,7 +11,7 @@ class BaseArgs:
     """Identifier of the environment."""
     env_type: str = "mujoco_playground"
     """Type of the environment. Currently only MuJoCo Playground is supported."""
-    total_timesteps: int = 200000000
+    total_timesteps: int = 2_000_000
     """Total timesteps to train for."""
     num_envs: int = 4
     """Number of parallel environments."""
@@ -39,7 +39,7 @@ class BaseArgs:
     """Interval (in steps) between logging to stdout."""
     eval_interval: int = 100000
     """Evaluation interval in environment steps."""
-    num_eval_envs: int = 10
+    num_eval_envs: int = 16
     """Number of parallel evaluation environments."""
     use_wandb: bool = False
     """Enable logging to Weights & Biases."""
@@ -67,15 +67,15 @@ class BaseArgs:
     """whether to enable PBT"""
     pbt_policy_idx: int = 0
     """the index of this policy in the population"""
-    pbt_num_policies: int = 8
+    pbt_num_policies: int = 4
     """the number of policies in the population"""
     pbt_workspace: str = "pbt_workspace"
     """the workspace directory for PBT"""
-    pbt_interval_steps: int = 100000
+    pbt_interval_steps: int = 25000
     """the interval in steps between PBT operations"""
-    pbt_start_after: int = 50000
+    pbt_start_after: int = 25000
     """start PBT operations after this many steps"""
-    pbt_initial_delay: int = 10000
+    pbt_initial_delay: int = 25000
     """initial delay before any PBT operations"""
     pbt_replace_fraction_best: float = 0.25
     """fraction of best policies to use for replacement"""
@@ -91,12 +91,16 @@ class BaseArgs:
     """minimum change factor for mutations"""
     pbt_change_max: float = 1.5
     """maximum change factor for mutations"""
-    pbt_dbg_mode: bool = False
+    pbt_dbg_mode: bool = True
     """enable PBT debug mode"""
     pbt_restart: bool = False
     """internal flag for PBT restart detection"""
     checkpoint_path: str = None
     """path to checkpoint file for loading"""
+    pbt_cleanup_interval: int = 5
+    """cleanup bottom performing policies every N PBT iterations"""
+    pbt_cleanup_enabled: bool = True
+    """enable automatic cleanup of replaced/bottom performing policies"""
 
 
 def get_args():

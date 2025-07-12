@@ -1,5 +1,6 @@
 """Population-Based Training implementation adapted from isaacgymenvs."""
 
+import logging
 import math
 import os
 import random
@@ -19,6 +20,9 @@ from pbt_baseline.hyperparams import PPO_MUTATION_CONFIG
 
 # Value for target objective when it is not known
 _UNINITIALIZED_VALUE = float(-1e9)
+
+# Setup logger for PBT module
+logger = logging.getLogger(__name__)
 
 
 def _checkpnt_name(iteration):
@@ -143,10 +147,10 @@ def _restart_process_with_new_params(
             import wandb
             wandb.run.finish()
         except Exception as exc:
-            print(f"Policy {policy_idx}: Exception {exc} in wandb.run.finish()")
+            logger.warning(f"Policy {policy_idx}: Exception {exc} in wandb.run.finish()")
             return
     
-    print(f"Policy {policy_idx}: Restarting self with args {modified_args}", flush=True)
+    logger.info(f"Policy {policy_idx}: Restarting self with args {modified_args}")
     # Change the first argument from script path to module name
     if modified_args[0].endswith('train.py'):
         modified_args[0] = '-m'
@@ -160,11 +164,11 @@ def initial_pbt_check(args):
         return
     
     if hasattr(args, "pbt_restart") and args.pbt_restart:
-        print("PBT job restarted from checkpoint, keep going...")
+        logger.info("PBT job restarted from checkpoint, keep going...")
         return
     
-    print("PBT run without 'pbt_restart=True' - must be the very start of the experiment!")
-    print("Mutating initial set of hyperparameters!")
+    logger.info("PBT run without 'pbt_restart=True' - must be the very start of the experiment!")
+    logger.info("Mutating initial set of hyperparameters!")
     
     pbt_params = PbtParams(args)
     new_params = mutate(
@@ -208,6 +212,14 @@ class PbtObserver:
         # Episode tracking for reward-based objectives
         self.episode_rewards = []
         self.episodes_to_track = 100  # Track last 100 episodes
+        
+        # Evaluation tracking for PBT objective
+        self.current_eval_reward = None
+        
+        # Cleanup tracking
+        self.cleanup_interval = getattr(args, 'pbt_cleanup_interval', 5)
+        self.cleanup_enabled = getattr(args, 'pbt_cleanup_enabled', True)
+        self.last_cleanup_iteration = -1
     
     def after_init(self, train_dir=None):
         """Initialize PBT workspace directories."""
@@ -223,28 +235,32 @@ class PbtObserver:
         self.episode_rewards.append(reward)
         if len(self.episode_rewards) > self.episodes_to_track:
             self.episode_rewards.pop(0)
+    
+    def process_eval_reward(self, eval_reward):
+        """Process evaluation reward for PBT objective tracking."""
+        if eval_reward is None:
+            raise ValueError("Evaluation reward cannot be None. Evaluation must be performed before PBT step.")
         
-        # Update target objective if we have enough episodes
-        if len(self.episode_rewards) >= min(self.episodes_to_track, self.num_envs):
-            self.target_objective_known = True
-            self.curr_target_objective_value = float(np.mean(self.episode_rewards))
-            
-            if (
-                self.best_objective_curr_iteration is None
-                or self.curr_target_objective_value > self.best_objective_curr_iteration
-            ):
-                print(
-                    f"Policy {self.policy_idx}: New best objective value "
-                    f"{self.curr_target_objective_value} in iteration {self.pbt_iteration}"
-                )
-                self.best_objective_curr_iteration = self.curr_target_objective_value
+        self.current_eval_reward = eval_reward
+        self.target_objective_known = True
+        self.curr_target_objective_value = float(eval_reward)
+        
+        if (
+            self.best_objective_curr_iteration is None
+            or self.curr_target_objective_value > self.best_objective_curr_iteration
+        ):
+            logger.info(
+                f"Policy {self.policy_idx}: New best objective value "
+                f"{self.curr_target_objective_value} in iteration {self.pbt_iteration}"
+            )
+            self.best_objective_curr_iteration = self.curr_target_objective_value
     
     def should_perform_pbt_step(self, global_step):
         """Check if PBT step should be performed."""
         if self.pbt_iteration == -1:
             self.pbt_iteration = global_step // self.pbt_params.interval_steps
             self.initial_env_frames = global_step
-            print(
+            logger.info(
                 f"Policy {self.policy_idx}: PBT init. Steps: {global_step}, "
                 f"pbt_iteration: {self.pbt_iteration}"
             )
@@ -255,7 +271,7 @@ class PbtObserver:
             return False
         
         if not self.target_objective_known:
-            print(
+            logger.debug(
                 f"Policy {self.policy_idx}: Not enough episodes for objective estimation"
             )
             return False
@@ -264,7 +280,7 @@ class PbtObserver:
         sec_since_experiment_start = time.time() - self.experiment_start
         pbt_start_after_sec = 1 if self.pbt_params.dbg_mode else 30
         if sec_since_experiment_start < pbt_start_after_sec:
-            print(
+            logger.debug(
                 f"Policy {self.policy_idx}: Not enough time passed since experiment start "
                 f"{sec_since_experiment_start}"
             )
@@ -272,231 +288,374 @@ class PbtObserver:
         
         return True
     
-    def perform_pbt_step(self, global_step, agent, experiment_name):
+    def perform_pbt_step(self, global_step, policy, experiment_name):
         """Perform PBT step: save checkpoint and potentially replace policy."""
-        print(f"Policy {self.policy_idx}: New pbt iteration!")
+        logger.info(f"Policy {self.policy_idx}: New pbt iteration!")
         self.pbt_iteration = global_step // self.pbt_params.interval_steps
         
         try:
-            self._save_pbt_checkpoint(agent, global_step, experiment_name)
+            self._save_pbt_checkpoint(policy, global_step, experiment_name)
         except Exception as exc:
-            print(f"Policy {self.policy_idx}: Exception {exc} when saving PBT checkpoint!")
+            logger.error(f"Policy {self.policy_idx}: Exception {exc} when saving PBT checkpoint!")
             return
         
         try:
             checkpoints = self._load_population_checkpoints()
         except Exception as exc:
-            print(f"Policy {self.policy_idx}: Exception {exc} when loading checkpoints!")
+            logger.error(f"Policy {self.policy_idx}: Exception {exc} when loading checkpoints!")
             return
         
         try:
             self._cleanup(checkpoints)
         except Exception as exc:
-            print(f"Policy {self.policy_idx}: Exception {exc} during cleanup!")
+            logger.warning(f"Policy {self.policy_idx}: Exception {exc} during cleanup!")
         
+        # Cleanup bottom performers based on PBT logic
+        if (self.cleanup_enabled and self.cleanup_interval > 0 and 
+            self.pbt_iteration - self.last_cleanup_iteration >= self.cleanup_interval):
+            try:
+                logger.info(f"Policy {self.policy_idx}: Performing PBT-based cleanup...")
+                self.cleanup_bottom_performers(checkpoints)
+                self.last_cleanup_iteration = self.pbt_iteration
+            except Exception as exc:
+                logger.warning(f"Policy {self.policy_idx}: Exception {exc} during PBT cleanup!")
+        
+        logger.debug(f"Policy {self.policy_idx}: Checking if we should replace policy in {checkpoints}")
+        # import ipdb; ipdb.set_trace()  # Commented out debug breakpoint
         # Determine if replacement should occur
         should_replace, replacement_policy = self._should_replace_policy(checkpoints)
         
         if should_replace:
+            # Mark current policy for cleanup if it's being replaced (not self-mutation)
+            if replacement_policy != self.policy_idx:
+                self.mark_policy_for_replacement(self.policy_idx, "replaced_in_pbt")
+            
             self._replace_policy(replacement_policy, checkpoints, experiment_name, global_step)
+        
+        # Clean up any policies marked for replacement during this iteration
+        self.cleanup_marked_policies()
         
         # Reset for next iteration
         self.best_objective_curr_iteration = None
         self.target_objective_known = False
     
-    def _should_replace_policy(self, checkpoints):
-        """Determine if current policy should be replaced."""
-        policies = list(range(self.pbt_num_policies))
-        target_objectives = []
+    def _save_pbt_checkpoint(self, policy, global_step, experiment_name):
+        """Save current policy checkpoint with performance metrics."""
+        checkpoint_name = _checkpnt_name(self.pbt_iteration)
+        checkpoint_path = os.path.join(self.curr_policy_workspace_dir, checkpoint_name)
         
-        for p in policies:
-            if checkpoints[p] is None:
-                target_objectives.append(_UNINITIALIZED_VALUE)
-            else:
-                target_objectives.append(checkpoints[p]["true_objective"])
-        
-        policies_sorted = sorted(zip(target_objectives, policies), reverse=True)
-        objectives = [objective for objective, p in policies_sorted]
-        policies_sorted = [p for objective, p in policies_sorted]
-        
-        objectives_filtered = [o for o in objectives if o > _UNINITIALIZED_VALUE]
-        
-        if len(objectives_filtered) <= max(2, self.pbt_num_policies // 2) and not self.pbt_params.dbg_mode:
-            print(f"Policy {self.policy_idx}: Not enough data to start PBT, {objectives_filtered}")
-            return False, None
-        
-        replace_worst = math.ceil(self.pbt_params.replace_fraction_worst * self.pbt_num_policies)
-        replace_best = math.ceil(self.pbt_params.replace_fraction_best * self.pbt_num_policies)
-        
-        best_policies = policies_sorted[:replace_best]
-        worst_policies = policies_sorted[-replace_worst:]
-        
-        if self.policy_idx not in worst_policies and not self.pbt_params.dbg_mode:
-            print(f"Policy {self.policy_idx} is doing well, not among worst_policies={worst_policies}")
-            return False, None
-        
-        # Check if current policy performance justifies replacement
-        if (
-            self.best_objective_curr_iteration is not None 
-            and not self.pbt_params.dbg_mode
-            and self.best_objective_curr_iteration >= min(objectives[:replace_best])
-        ):
-            print(
-                f"Policy {self.policy_idx}: best_objective={self.best_objective_curr_iteration} "
-                f"is better than some top policies. Keep training."
-            )
-            return False, None
-        
-        # Select replacement policy
-        replacement_policy_candidate = random.choice(best_policies)
-        candidate_objective = checkpoints[replacement_policy_candidate]["true_objective"]
-        objective_delta = candidate_objective - self.curr_target_objective_value
-        
-        # Calculate threshold for replacement
-        num_outliers = int(math.floor(0.2 * len(objectives_filtered)))
-        if len(objectives_filtered) > num_outliers:
-            objectives_filtered_sorted = sorted(objectives_filtered)
-            objectives_std = np.std(objectives_filtered_sorted[num_outliers:])
-        else:
-            objectives_std = np.std(objectives_filtered)
-        
-        objective_threshold = self.pbt_params.replace_threshold_frac_std * objectives_std
-        absolute_threshold = self.pbt_params.replace_threshold_frac_absolute * abs(candidate_objective)
-        
-        if objective_delta > objective_threshold and objective_delta > absolute_threshold:
-            print(f"Replacing policy {self.policy_idx} with {replacement_policy_candidate}")
-            return True, replacement_policy_candidate
-        else:
-            print(f"Policy {self.policy_idx}: Performance difference not sufficient for replacement")
-            return True, self.policy_idx  # Replace with self (mutate parameters only)
-    
-    def _replace_policy(self, replacement_policy, checkpoints, experiment_name, global_step):
-        """Replace current policy with another policy and mutate parameters."""
-        # Choose whether to copy parameters or keep current ones
-        if random.random() < 0.5:
-            new_params = checkpoints[replacement_policy]["params"]
-        else:
-            new_params = self.pbt_params.mutable_params
-        
-        # Mutate parameters
-        new_params = mutate(
-            new_params,
-            self.pbt_params.params_to_mutate,
-            self.pbt_params.mutation_rate,
-            self.pbt_params.change_min,
-            self.pbt_params.change_max,
-        )
-        
-        try:
-            restart_checkpoint = os.path.abspath(checkpoints[replacement_policy]["checkpoint"])
-            
-            # Copy checkpoint to temp directory
-            checkpoint_tmp_dir = f"/tmp/{experiment_name}_p{self.policy_idx}"
-            if os.path.isdir(checkpoint_tmp_dir):
-                shutil.rmtree(checkpoint_tmp_dir)
-            
-            os.makedirs(checkpoint_tmp_dir, exist_ok=True)
-            restart_checkpoint_tmp = join(checkpoint_tmp_dir, os.path.basename(restart_checkpoint))
-            shutil.copyfile(restart_checkpoint, restart_checkpoint_tmp)
-            
-            # Rewrite checkpoint with current step
-            self._rewrite_checkpoint(restart_checkpoint_tmp, global_step)
-            
-        except Exception as exc:
-            print(f"Policy {self.policy_idx}: Exception {exc} when preparing checkpoint for restart")
-            return
-        
-        print(f"Policy {self.policy_idx}: Restarting with mutated parameters!")
-        _restart_process_with_new_params(
-            self.policy_idx, new_params, restart_checkpoint_tmp, experiment_name, self.with_wandb
-        )
-    
-    def _rewrite_checkpoint(self, restart_checkpoint_tmp: str, global_step: int) -> None:
-        """Rewrite checkpoint with current global step."""
-        state = torch.load(restart_checkpoint_tmp)
-        print(f"Policy {self.policy_idx}: restarting from checkpoint, step {state.get('global_step', 'unknown')}")
-        print(f"Replacing with step {global_step}...")
-        state["global_step"] = global_step
-        
-        pbt_history = state.get("pbt_history", [])
-        pbt_history.append((self.policy_idx, global_step, self.curr_target_objective_value))
-        state["pbt_history"] = pbt_history
-        
-        torch.save(state, restart_checkpoint_tmp)
-        print(f"Policy {self.policy_idx}: checkpoint rewritten!")
-    
-    def _save_pbt_checkpoint(self, agent, global_step, experiment_name):
-        """Save PBT-specific checkpoint."""
-        checkpoint_file = join(self.curr_policy_workspace_dir, _model_checkpnt_name(self.pbt_iteration))
-        agent.save_checkpoint(checkpoint_file)
-        
-        pbt_checkpoint_file = join(self.curr_policy_workspace_dir, _checkpnt_name(self.pbt_iteration))
-        
-        pbt_checkpoint = {
+        # Save checkpoint data
+        checkpoint_data = {
+            "policy_idx": self.policy_idx,
             "iteration": self.pbt_iteration,
-            "true_objective": self.curr_target_objective_value,
             "global_step": global_step,
+            "true_objective": self.curr_target_objective_value,
             "params": self.pbt_params.mutable_params,
-            "checkpoint": os.path.abspath(checkpoint_file),
-            "pbt_checkpoint": os.path.abspath(pbt_checkpoint_file),
             "experiment_name": experiment_name,
+            "timestamp": time.time(),
         }
         
-        with open(pbt_checkpoint_file, "w") as fobj:
-            print(f"Policy {self.policy_idx}: Saving {pbt_checkpoint_file}...")
-            yaml.dump(pbt_checkpoint, fobj)
-    
-    def _policy_workspace_dir(self, policy_idx):
-        """Get workspace directory for a policy."""
-        return join(self.pbt_workspace_dir, f"{policy_idx:03d}")
+        # Save policy weights
+        model_checkpoint_name = _model_checkpnt_name(self.pbt_iteration)
+        model_checkpoint_path = os.path.join(self.curr_policy_workspace_dir, model_checkpoint_name)
+        
+        torch.save({
+            'policy_state_dict': policy.state_dict(),
+            'global_step': global_step,
+        }, model_checkpoint_path)
+        
+        # Save metadata
+        with open(checkpoint_path, 'w') as f:
+            yaml.dump(checkpoint_data, f)
+        
+        logger.info(f"Policy {self.policy_idx}: Saved checkpoint {checkpoint_path} with objective {self.curr_target_objective_value}")
     
     def _load_population_checkpoints(self):
-        """Load checkpoints for all policies in the population."""
-        checkpoints = dict()
+        """Load checkpoints from all policies in the population."""
+        checkpoints = {}
         
         for policy_idx in range(self.pbt_num_policies):
-            checkpoints[policy_idx] = None
+            policy_workspace = self._policy_workspace_dir(policy_idx)
             
-            policy_workspace_dir = self._policy_workspace_dir(policy_idx)
-            
-            if not os.path.isdir(policy_workspace_dir):
+            if not os.path.exists(policy_workspace):
+                checkpoints[policy_idx] = None
                 continue
             
-            pbt_checkpoint_files = [f for f in os.listdir(policy_workspace_dir) if f.endswith(".yaml")]
-            pbt_checkpoint_files.sort(reverse=True)
+            # Find the latest checkpoint for this policy
+            checkpoint_files = [f for f in os.listdir(policy_workspace) if f.endswith('.yaml')]
+            if not checkpoint_files:
+                checkpoints[policy_idx] = None
+                continue
             
-            for pbt_checkpoint_file in pbt_checkpoint_files:
-                iteration_str = pbt_checkpoint_file.split(".")[0]
-                iteration = int(iteration_str)
+            # Get the most recent checkpoint
+            latest_checkpoint = max(checkpoint_files)
+            checkpoint_path = os.path.join(policy_workspace, latest_checkpoint)
+            
+            try:
+                with open(checkpoint_path, 'r') as f:
+                    checkpoint_data = yaml.safe_load(f)
                 
-                if iteration <= self.pbt_iteration:
-                    with open(join(policy_workspace_dir, pbt_checkpoint_file), "r") as fobj:
-                        print(f"Policy {self.policy_idx}: Loading policy-{policy_idx} {pbt_checkpoint_file}")
-                        checkpoints[policy_idx] = yaml.load(fobj, Loader=yaml.FullLoader)
-                        break
+                # Load model weights path
+                iteration = checkpoint_data['iteration']
+                model_checkpoint_name = _model_checkpnt_name(iteration)
+                model_checkpoint_path = os.path.join(policy_workspace, model_checkpoint_name)
+                
+                checkpoint_data['model_path'] = model_checkpoint_path
+                checkpoints[policy_idx] = checkpoint_data
+                
+            except Exception as e:
+                logger.warning(f"Policy {self.policy_idx}: Failed to load checkpoint for policy {policy_idx}: {e}")
+                checkpoints[policy_idx] = None
         
         return checkpoints
     
+    def _should_replace_policy(self, checkpoints):
+        """Determine if current policy should be replaced."""
+        # Get valid checkpoints with objectives
+        valid_checkpoints = {
+            idx: ckpt for idx, ckpt in checkpoints.items() 
+            if ckpt is not None and ckpt['true_objective'] != _UNINITIALIZED_VALUE
+        }
+        
+        if len(valid_checkpoints) < 2:
+            logger.debug(f"Policy {self.policy_idx}: Not enough valid checkpoints for comparison")
+            return False, None
+        
+        # Sort policies by objective (descending)
+        policies_by_objective = sorted(
+            valid_checkpoints.items(), 
+            key=lambda x: x[1]['true_objective'], 
+            reverse=True
+        )
+        
+        objectives = [ckpt['true_objective'] for _, ckpt in policies_by_objective]
+        
+        # Determine replacement thresholds
+        replace_worst = max(1, int(self.pbt_params.replace_fraction_worst * self.pbt_num_policies))
+        replace_best = max(1, int(self.pbt_params.replace_fraction_best * self.pbt_num_policies))
+        
+        worst_policies = [idx for idx, _ in policies_by_objective[-replace_worst:]]
+        best_policies = [idx for idx, _ in policies_by_objective[:replace_best]]
+        
+        logger.debug(f"Policy {self.policy_idx}: Objectives: {objectives}")
+        logger.debug(f"Policy {self.policy_idx}: Best policies: {best_policies}, Worst policies: {worst_policies}")
+        
+        # Check if current policy should be replaced
+        if self.policy_idx not in worst_policies:
+            logger.debug(f"Policy {self.policy_idx}: Not among worst policies, no replacement needed")
+            return False, None
+        
+        # Check if we've had enough training time
+        if not self._enough_training_time():
+            logger.debug(f"Policy {self.policy_idx}: Not enough training time for replacement")
+            return False, None
+        
+        # Select a random policy from the best performers
+        import random
+        replacement_policy = random.choice(best_policies)
+        
+        candidate_objective = valid_checkpoints[replacement_policy]['true_objective']
+        current_objective = self.curr_target_objective_value
+        
+        # Check if improvement is significant enough
+        objective_delta = candidate_objective - current_objective
+        objectives_std = np.std(objectives)
+        threshold = self.pbt_params.replace_threshold_frac_std * objectives_std
+        
+        if objective_delta > threshold:
+            logger.info(f"Policy {self.policy_idx}: Will be replaced by policy {replacement_policy} "
+                  f"(improvement: {objective_delta:.4f} > threshold: {threshold:.4f})")
+            return True, replacement_policy
+        else:
+            logger.info(f"Policy {self.policy_idx}: Improvement not significant enough "
+                  f"({objective_delta:.4f} <= {threshold:.4f}), mutating current policy")
+            return True, self.policy_idx  # Replace with self (mutation only)
+    
+    def _enough_training_time(self):
+        """Check if policy has had enough training time."""
+        time_since_start = time.time() - self.experiment_start
+        min_time = 1 if self.pbt_params.dbg_mode else 30
+        return time_since_start >= min_time
+    
+    def _replace_policy(self, replacement_policy_idx, checkpoints, experiment_name, global_step):
+        """Replace current policy with another policy + mutation."""
+        if replacement_policy_idx == self.policy_idx:
+            # Just mutate current parameters
+            new_params = mutate(
+                self.pbt_params.mutable_params,
+                self.pbt_params.params_to_mutate,
+                self.pbt_params.mutation_rate,
+                self.pbt_params.change_min,
+                self.pbt_params.change_max,
+            )
+            checkpoint_to_load = None
+        else:
+            # Load parameters from replacement policy and mutate them
+            replacement_ckpt = checkpoints[replacement_policy_idx]
+            base_params = replacement_ckpt['params']
+            
+            new_params = mutate(
+                base_params,
+                self.pbt_params.params_to_mutate,
+                self.pbt_params.mutation_rate,
+                self.pbt_params.change_min,
+                self.pbt_params.change_max,
+            )
+            checkpoint_to_load = replacement_ckpt['model_path']
+        
+        logger.info(f"Policy {self.policy_idx}: Restarting with new parameters from policy {replacement_policy_idx}")
+        
+        # Restart process with new parameters and optionally new weights
+        _restart_process_with_new_params(
+            self.policy_idx, new_params, checkpoint_to_load, experiment_name, self.with_wandb
+        )
+    
+    def _policy_workspace_dir(self, policy_idx):
+        """Get workspace directory for a specific policy."""
+        return os.path.join(self.pbt_workspace_dir, f"policy_{policy_idx:02d}")
+    
     def _cleanup(self, checkpoints):
-        """Clean up old checkpoints."""
-        iterations = []
-        for policy_idx, checkpoint in checkpoints.items():
-            if checkpoint is None:
-                iterations.append(0)
-            else:
-                iterations.append(checkpoint["iteration"])
-        
-        oldest_iteration = sorted(iterations)[0]
-        cleanup_threshold = oldest_iteration - 20
-        
-        pbt_checkpoint_files = [f for f in os.listdir(self.curr_policy_workspace_dir)]
-        
-        for f in pbt_checkpoint_files:
-            if "." in f:
-                iteration_idx = int(f.split(".")[0])
-                if iteration_idx <= cleanup_threshold:
-                    print(f"Policy {self.policy_idx}: PBT cleanup: removing checkpoint {f}")
+        """Clean up old checkpoints to save space."""
+        # Keep only the latest 3 checkpoints per policy
+        for policy_idx in range(self.pbt_num_policies):
+            policy_workspace = self._policy_workspace_dir(policy_idx)
+            if not os.path.exists(policy_workspace):
+                continue
+            
+            # Get all checkpoint files
+            checkpoint_files = [f for f in os.listdir(policy_workspace) if f.endswith('.yaml')]
+            model_files = [f for f in os.listdir(policy_workspace) if f.endswith('.pth')]
+            
+            # Sort by iteration number and keep only latest 3
+            if len(checkpoint_files) > 3:
+                checkpoint_files.sort()
+                for old_file in checkpoint_files[:-3]:
                     try:
-                        os.remove(join(self.curr_policy_workspace_dir, f))
-                    except Exception:
-                        pass  # Ignore cleanup errors
+                        os.remove(os.path.join(policy_workspace, old_file))
+                        logger.debug(f"Removed old checkpoint: {old_file}")
+                    except Exception as e:
+                        logger.warning(f"Failed to remove checkpoint {old_file}: {e}")
+            
+            if len(model_files) > 3:
+                model_files.sort()
+                for old_file in model_files[:-3]:
+                    try:
+                        os.remove(os.path.join(policy_workspace, old_file))
+                        logger.debug(f"Removed old model file: {old_file}")
+                    except Exception as e:
+                        logger.warning(f"Failed to remove model file {old_file}: {e}")
+    
+    def cleanup_replaced_policies(self, replaced_policies):
+        """Clean up policies that have been replaced/mutated in PBT.
+        
+        Args:
+            replaced_policies: List of policy indices that were replaced (bottom performers)
+        """
+        if not replaced_policies:
+            return
+            
+        logger.info(f"Policy {self.policy_idx}: Cleaning up replaced policies: {replaced_policies}")
+        
+        # Clean up policy workspaces for replaced policies
+        for policy_idx in replaced_policies:
+            policy_workspace = self._policy_workspace_dir(policy_idx)
+            if os.path.exists(policy_workspace):
+                try:
+                    shutil.rmtree(policy_workspace)
+                    logger.info(f"Removed workspace for replaced policy {policy_idx}: {policy_workspace}")
+                except OSError as e:
+                    logger.warning(f"Failed to remove workspace for policy {policy_idx}: {e}")
+        
+        # Clean up model files for replaced policies
+        models_dir = os.path.join(os.path.dirname(self.train_dir), "models")
+        if os.path.exists(models_dir):
+            self._cleanup_models_for_policies(models_dir, replaced_policies)
+    
+    def cleanup_bottom_performers(self, checkpoints):
+        """Identify and clean up bottom performing policies based on PBT logic.
+        
+        Args:
+            checkpoints: Current population checkpoints
+        """
+        # Get valid checkpoints with objectives
+        valid_checkpoints = {
+            idx: ckpt for idx, ckpt in checkpoints.items() 
+            if ckpt is not None and ckpt['true_objective'] != _UNINITIALIZED_VALUE
+        }
+        
+        if len(valid_checkpoints) < 2:
+            logger.debug(f"Policy {self.policy_idx}: Not enough valid checkpoints for cleanup")
+            return
+        
+        # Sort policies by objective (descending)
+        policies_by_objective = sorted(
+            valid_checkpoints.items(), 
+            key=lambda x: x[1]['true_objective'], 
+            reverse=True
+        )
+        
+        # Determine bottom performers to remove
+        replace_worst = max(1, int(self.pbt_params.replace_fraction_worst * self.pbt_num_policies))
+        worst_policies = [idx for idx, _ in policies_by_objective[-replace_worst:]]
+        
+        # Only clean up policies that are significantly worse than the best
+        objectives = [ckpt['true_objective'] for _, ckpt in policies_by_objective]
+        objectives_std = np.std(objectives)
+        best_objective = objectives[0]
+        
+        policies_to_cleanup = []
+        for policy_idx in worst_policies:
+            policy_objective = valid_checkpoints[policy_idx]['true_objective']
+            objective_gap = best_objective - policy_objective
+            
+            # Only cleanup if performance gap is significant
+            if objective_gap > self.pbt_params.replace_threshold_frac_std * objectives_std:
+                policies_to_cleanup.append(policy_idx)
+        
+        if policies_to_cleanup:
+            logger.info(f"Policy {self.policy_idx}: Identified bottom performers for cleanup: {policies_to_cleanup}")
+            self.cleanup_replaced_policies(policies_to_cleanup)
+    
+    def _cleanup_models_for_policies(self, models_dir, policy_indices):
+        """Clean up model files for specific policies."""
+        try:
+            for model_file in os.listdir(models_dir):
+                if model_file.endswith('.pth'):
+                    model_path = os.path.join(models_dir, model_file)
+                    
+                    # Check if model belongs to removed policy
+                    if '__p' in model_file:
+                        try:
+                            policy_part = model_file.split('__p')[1]
+                            policy_idx = int(policy_part.split('_')[0])
+                            if policy_idx in policy_indices:
+                                os.remove(model_path)
+                                logger.info(f"Removed model file for policy {policy_idx}: {model_file}")
+                        except (ValueError, IndexError, OSError) as e:
+                            logger.warning(f"Error removing model file {model_file}: {e}")
+                        
+        except OSError as e:
+            logger.warning(f"Error cleaning models directory: {e}")
+    
+    def mark_policy_for_replacement(self, policy_idx, reason="bottom_performer"):
+        """Mark a policy for cleanup after replacement.
+        
+        Args:
+            policy_idx: Index of policy to mark for cleanup
+            reason: Reason for replacement (for logging)
+        """
+        logger.info(f"Policy {self.policy_idx}: Marking policy {policy_idx} for cleanup ({reason})")
+        
+        # Store in a list to cleanup after PBT step completes
+        if not hasattr(self, '_policies_to_cleanup'):
+            self._policies_to_cleanup = []
+        
+        if policy_idx not in self._policies_to_cleanup:
+            self._policies_to_cleanup.append(policy_idx)
+    
+    def cleanup_marked_policies(self):
+        """Clean up policies that were marked for replacement during this PBT iteration."""
+        if hasattr(self, '_policies_to_cleanup') and self._policies_to_cleanup:
+            logger.info(f"Policy {self.policy_idx}: Cleaning up marked policies: {self._policies_to_cleanup}")
+            self.cleanup_replaced_policies(self._policies_to_cleanup)
+            self._policies_to_cleanup = []  # Clear the list

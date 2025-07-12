@@ -4,7 +4,7 @@ from pbt_baseline.launcher.run_description import ParamGrid, RunDescription, Exp
 from pbt_baseline.experiments_.run_utils import version
 
 
-_env = 'h1hand-reach-v0'
+_env = 'h1hand-hurdle-v0'
 _name = f'{_env}_{version}'
 _iterations = 100000
 _pbt_num_policies = 4
@@ -24,10 +24,10 @@ _experiments = [
         f'python -m pbt_baseline.train '
         f'--env-name {_env} '
         f'--total-timesteps {_iterations} '
-        f'--num-envs 4 '
+        f'--num-envs 8 '
         f'--seed 0 '
-        f'--save-interval 20000 '
-        f'--eval-interval 10000 '
+        # f'--save-interval 20000 '
+        # f'--eval-interval 10000 '
         # f'--use-wandb '
         f'--project {_wandb_project} '
         f'--pbt-enabled '
