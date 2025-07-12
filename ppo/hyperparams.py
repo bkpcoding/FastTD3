@@ -45,7 +45,7 @@ class BaseArgs:
     """Enable logging to Weights & Biases."""
     project: str = "rl_scratch"
     """wandb project name."""
-    exp_name: str = "ppo"
+    exp_name: str = "ppo_asymmetric_obs"
     """Experiment name used for logging and checkpointing."""
     seed: int = 1
     """Random seed."""
@@ -61,6 +61,8 @@ class BaseArgs:
     """Enable automatic mixed precision."""
     amp_dtype: str = "bf16"
     """Precision for AMP (bf16 or fp16)."""
+    enable_asymmetric_obs: bool = False
+    """Enable asymmetric actor-critic observations (if environment supports it)."""
 
 
 # Placeholder dataclasses for other environment types. These will be filled out

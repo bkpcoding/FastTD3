@@ -136,27 +136,53 @@ def main():
     obs = envs.reset()
     n_obs = envs.num_obs if isinstance(envs.num_obs, int) else envs.num_obs[0]
     n_act = envs.num_actions
+    
+    # Check for asymmetric observations (privileged information for critic)
+    asymmetric_obs = (
+        args.enable_asymmetric_obs and 
+        hasattr(envs, 'asymmetric_obs') and envs.asymmetric_obs
+    )
+    if asymmetric_obs:
+        n_critic_obs = envs.num_privileged_obs
+        logger.info(f"Asymmetric observations enabled - Actor: {n_obs}, Critic: {n_critic_obs}")
+    else:
+        n_critic_obs = n_obs
+        logger.info(f"Symmetric observations - Actor/Critic: {n_obs}")
 
-    policy = ActorCritic(n_obs, n_act, args.hidden_dim, device=device)
+    policy = ActorCritic(n_obs, n_act, args.hidden_dim, device=device, n_critic_obs=n_critic_obs)
     optimizer = optim.Adam(policy.parameters(), lr=args.learning_rate)
     normalizer = EmpiricalNormalization(shape=n_obs, device=device)
+    
+    # Create separate normalizer for critic observations if asymmetric
+    if asymmetric_obs:
+        critic_normalizer = EmpiricalNormalization(shape=n_critic_obs, device=device)
+    else:
+        critic_normalizer = normalizer
 
     if args.compile:
         policy_act = torch.compile(policy.act)
         policy_value = torch.compile(policy.value)
         policy_get_dist = torch.compile(policy.get_dist)
         normalize_obs = torch.compile(normalizer.forward)
+        if asymmetric_obs:
+            normalize_critic_obs = torch.compile(critic_normalizer.forward)
         # Keep non-compiled version for evaluation to avoid FX tracing conflicts
         eval_normalize_obs = normalizer.forward
+        if asymmetric_obs:
+            eval_normalize_critic_obs = critic_normalizer.forward
     else:
         policy_act = policy.act
         policy_value = policy.value
         policy_get_dist = policy.get_dist
         normalize_obs = normalizer.forward
         eval_normalize_obs = normalizer.forward
+        if asymmetric_obs:
+            normalize_critic_obs = critic_normalizer.forward
+            eval_normalize_critic_obs = critic_normalizer.forward
 
     buffer = RolloutBuffer(
-        args.rollout_length, args.num_envs, n_obs, n_act, device=device
+        args.rollout_length, args.num_envs, n_obs, n_act, device=device,
+        critic_obs_dim=n_critic_obs if asymmetric_obs else None
     )
 
     # Initialize spatial coverage metric
@@ -325,10 +351,19 @@ def main():
                     device_type=amp_device_type, dtype=amp_dtype, enabled=amp_enabled
                 ):
                     norm_obs = normalize_obs(obs)
-                    action, logp, value = policy_act(norm_obs)
+                    
+                    # Get critic observations if using asymmetric observations
+                    if asymmetric_obs:
+                        critic_obs = envs.get_privileged_obs()
+                        norm_critic_obs = normalize_critic_obs(critic_obs)
+                        action, logp, value = policy_act(norm_obs, norm_critic_obs)
+                    else:
+                        critic_obs = None
+                        action, logp, value = policy_act(norm_obs)
+                        
                 next_obs, reward, done, _ = envs.step(action)
                 # Add each environment's transition to buffer
-                buffer.add(obs, action, logp, reward, done, value)
+                buffer.add(obs, action, logp, reward, done, value, critic_obs)
 
                 obs = next_obs
                 global_step += args.num_envs  # Update by number of environments
@@ -358,7 +393,12 @@ def main():
             with torch.no_grad(), autocast(
                 device_type=amp_device_type, dtype=amp_dtype, enabled=amp_enabled
             ):
-                last_values = policy_value(normalize_obs(obs))  # Shape: [num_envs]
+                if asymmetric_obs:
+                    # Use privileged observations for value estimation
+                    last_critic_obs = envs.get_privileged_obs()
+                    last_values = policy_value(normalize_critic_obs(last_critic_obs))
+                else:
+                    last_values = policy_value(normalize_obs(obs))
             # Compute advantages for each environment's data separately
             buffer.compute_returns_and_advantage(
                 last_values, args.gamma, args.gae_lambda, args.num_envs
@@ -372,9 +412,14 @@ def main():
             epoch_updates = 0
 
             for epoch in range(args.update_epochs):
-                for b_obs, b_actions, b_logp, b_returns, b_adv in buffer.get_batches(
-                    args.batch_size
-                ):
+                batch_generator = buffer.get_batches(args.batch_size)
+                for batch_data in batch_generator:
+                    if asymmetric_obs:
+                        b_obs, b_actions, b_logp, b_returns, b_adv, b_critic_obs = batch_data
+                    else:
+                        b_obs, b_actions, b_logp, b_returns, b_adv = batch_data
+                        b_critic_obs = None
+                    
                     # Add batch observations to coverage metric
                     # coverage_metric.add_batch_data(b_obs)
                     with autocast(
@@ -394,7 +439,11 @@ def main():
                         )
                         policy_loss = torch.max(pg_loss1, pg_loss2).mean()
 
-                        value = policy_value(normalize_obs(b_obs))
+                        # Use appropriate observations for value function
+                        if asymmetric_obs:
+                            value = policy_value(normalize_critic_obs(b_critic_obs))
+                        else:
+                            value = policy_value(normalize_obs(b_obs))
                         value_loss = F.mse_loss(value, b_returns)
                         entropy = dist.entropy().sum(-1).mean()
 

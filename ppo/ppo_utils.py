@@ -7,6 +7,7 @@ class RolloutBuffer:
     Stores one rollout of length `T` collected from `N` parallel envs.
 
     Data layout is   (T, N, ·)   which makes the GAE recursion easy.
+    Supports asymmetric actor-critic observations.
     """
 
     def __init__(self,
@@ -14,11 +15,21 @@ class RolloutBuffer:
                  num_envs: int,
                  obs_dim: int,
                  act_dim: int,
-                 device=None):
+                 device=None,
+                 critic_obs_dim: int = None):
         self.T, self.N = rollout_length, num_envs
+        self.asymmetric_obs = critic_obs_dim is not None and critic_obs_dim != obs_dim
         shape = (rollout_length, num_envs)
 
+        # Actor observations (regular)
         self.obs        = torch.zeros(*shape,  obs_dim,  device=device)
+        
+        # Critic observations (privileged, if asymmetric)
+        if self.asymmetric_obs:
+            self.critic_obs = torch.zeros(*shape, critic_obs_dim, device=device)
+        else:
+            self.critic_obs = None
+            
         self.actions    = torch.zeros(*shape,  act_dim,  device=device)
         self.logprobs   = torch.zeros(*shape,            device=device)
         self.rewards    = torch.zeros(*shape,            device=device)
@@ -32,9 +43,10 @@ class RolloutBuffer:
     # ------------------------------------------------------------------
     # storing one transition for *every* env at the current time step
     # ------------------------------------------------------------------
-    def add(self, obs, action, logp, reward, done, value):
+    def add(self, obs, action, logp, reward, done, value, critic_obs=None):
         """
         Args are tensors of shape (N, ·) coming straight from the vector env.
+        critic_obs: Optional privileged observations for critic (if asymmetric)
         """
         if self.ptr_step >= self.T:
             return
@@ -44,6 +56,11 @@ class RolloutBuffer:
         self.rewards[self.ptr_step]  = reward
         self.dones[self.ptr_step]    = done
         self.values[self.ptr_step]   = value
+        
+        # Store critic observations if using asymmetric observations
+        if self.asymmetric_obs and critic_obs is not None:
+            self.critic_obs[self.ptr_step] = critic_obs
+            
         self.ptr_step += 1
 
     # ------------------------------------------------------------------
@@ -96,9 +113,17 @@ class RolloutBuffer:
         logprobs   = self.logprobs[:self.ptr_step].reshape(total)
         returns    = self.returns[:self.ptr_step].reshape(total)
         advantages = self.advantages[:self.ptr_step].reshape(total)
-        for idx in sampler:
-            yield (obs[idx], actions[idx], logprobs[idx],
-                   returns[idx], advantages[idx])
+        
+        # Include critic observations if using asymmetric observations
+        if self.asymmetric_obs:
+            critic_obs = self.critic_obs[:self.ptr_step].reshape(total, -1)
+            for idx in sampler:
+                yield (obs[idx], actions[idx], logprobs[idx],
+                       returns[idx], advantages[idx], critic_obs[idx])
+        else:
+            for idx in sampler:
+                yield (obs[idx], actions[idx], logprobs[idx],
+                       returns[idx], advantages[idx])
 
     def clear(self):
         self.ptr_step = 0
