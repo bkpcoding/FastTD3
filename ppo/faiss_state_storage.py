@@ -10,7 +10,6 @@ import pickle
 from dataclasses import dataclass, asdict
 import torch
 import faiss
-from fast_td3.environments.mujoco_playground_env import make_env
 from .hyperparams import get_args
 
 os.environ["TORCHDYNAMO_INLINE_INBUILT_NN_MODULES"] = "1"
@@ -32,6 +31,7 @@ torch._dynamo.config.suppress_errors = True
 @dataclass
 class StateInfo:
     """Information associated with a stored state."""
+    hash_key: str
     state_vector: np.ndarray
     episode_id: int
     step_id: int
@@ -101,6 +101,7 @@ class FAISSStateStorage:
         return index
     
     def add_state(self, 
+                  hash_key: str,
                   state: np.ndarray, 
                   episode_id: int, 
                   step_id: int, 
@@ -159,6 +160,7 @@ class FAISSStateStorage:
         
         # Store state info
         state_info = StateInfo(
+            hash_key=hash_key,
             state_vector=state.flatten(),
             episode_id=episode_id,
             step_id=step_id,

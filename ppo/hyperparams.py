@@ -13,7 +13,7 @@ class BaseArgs:
     """Type of the environment. Currently only MuJoCo Playground is supported."""
     total_timesteps: int = 30000000
     """Total timesteps to train for."""
-    num_envs: int = 128
+    num_envs: int = 1024
     """Number of parallel environments."""
     learning_rate: float = 3e-4
     """Learning rate for the optimizer."""
@@ -41,7 +41,7 @@ class BaseArgs:
     """Evaluation interval in environment steps."""
     num_eval_envs: int = 16
     """Number of parallel evaluation environments."""
-    use_wandb: bool = True
+    use_wandb: bool = False
     """Enable logging to Weights & Biases."""
     project: str = "rl_scratch"
     """wandb project name."""
@@ -57,12 +57,23 @@ class BaseArgs:
     """How often to save model checkpoints. If 0, disabled."""
     compile: bool = True
     """Use torch.compile on key functions."""
+    device_rank: int = 0
+    """Device rank for multi-GPU training."""
     amp: bool = False
     """Enable automatic mixed precision."""
     amp_dtype: str = "bf16"
     """Precision for AMP (bf16 or fp16)."""
     enable_asymmetric_obs: bool = False
     """Enable asymmetric actor-critic observations (if environment supports it)."""
+    use_simbav2: bool = False
+    """Use SimbaV2 architecture instead of standard MLP networks."""
+    use_domain_randomization: bool = False
+    """Use domain randomization."""
+    use_push_randomization: bool = False
+    """Use push randomization."""
+    use_tuned_reward: bool = False
+    """Use tuned reward."""
+    
 
 
 # Placeholder dataclasses for other environment types. These will be filled out

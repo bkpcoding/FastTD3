@@ -16,7 +16,8 @@ import copy
 
 from fast_td3.environments.mujoco_playground_env import make_env
 from fast_td3.fast_td3_utils import EmpiricalNormalization
-from .ppo import ActorCritic, calculate_network_norms
+# Import architecture based on config flag
+# Will be set after args are parsed
 from .ppo_utils import RolloutBuffer, save_ppo_params
 from tensordict import TensorDict
 
@@ -356,6 +357,14 @@ class AsyncRolloutManager:
 def main():
     args = get_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # Import architecture based on config flag
+    if args.use_simbav2:
+        from .ppo_simbav2 import ActorCritic, calculate_network_norms
+        print("Using SimbaV2 architecture")
+    else:
+        from .ppo import ActorCritic, calculate_network_norms
+        print("Using standard MLP architecture")
 
     amp_enabled = args.amp and torch.cuda.is_available()
     amp_device_type = "cuda" if torch.cuda.is_available() else "cpu"
