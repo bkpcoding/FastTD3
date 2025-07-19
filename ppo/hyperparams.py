@@ -11,45 +11,47 @@ class BaseArgs:
     """Identifier of the environment."""
     env_type: str = "mujoco_playground"
     """Type of the environment. Currently only MuJoCo Playground is supported."""
-    total_timesteps: int = 30000000
+    total_timesteps: int = 100_000
     """Total timesteps to train for."""
-    num_envs: int = 1024
+    num_envs: int = 32768
     """Number of parallel environments."""
-    learning_rate: float = 3e-4
+    learning_rate: float = 1e-4
     """Learning rate for the optimizer."""
-    gamma: float = 0.99
+    gamma: float = 0.98
     """Discount factor."""
     gae_lambda: float = 0.95
     """Lambda for GAE."""
     clip_eps: float = 0.2
     """Clipping range for the policy loss."""
-    ent_coef: float = 0.01
+    ent_coef: float = 0.0
     """Entropy regularization coefficient."""
     vf_coef: float = 0.5
     """Value function loss coefficient."""
-    update_epochs: int = 4
+    update_epochs: int = 5
     """Number of optimization epochs per update."""
-    batch_size: int = 512
+    batch_size: int = 1024
     """Mini-batch size."""
-    rollout_length: int = 64
+    rollout_length: int = 32
     """Number of steps to collect before each update."""
-    hidden_dim: int = 256
+    hidden_dim: int = 512
     """Hidden dimension of policy and value networks."""
-    log_interval: int = 10000
+    log_interval: int = 5000
     """Interval (in steps) between logging to stdout."""
-    eval_interval: int = 500000
+    eval_interval: int = 5000
     """Evaluation interval in environment steps."""
-    num_eval_envs: int = 16
+    num_eval_envs: int = 1024
     """Number of parallel evaluation environments."""
-    use_wandb: bool = False
+    render_interval: int = 5000
+    """Interval (in steps) between video rendering. If 0, disabled."""
+    use_wandb: bool = True
     """Enable logging to Weights & Biases."""
-    project: str = "rl_scratch"
+    project: str = "MJX"
     """wandb project name."""
-    exp_name: str = "ppo_asymmetric_obs"
+    exp_name: str = "ppo_brax_hyperparams"
     """Experiment name used for logging and checkpointing."""
     seed: int = 1
     """Random seed."""
-    max_grad_norm: float = 1.0
+    max_grad_norm: float = 0.0
     """Maximum gradient norm for clipping."""
     output_dir: str = "logs"
     """Directory to store checkpoints and logs."""
@@ -73,6 +75,12 @@ class BaseArgs:
     """Use push randomization."""
     use_tuned_reward: bool = False
     """Use tuned reward."""
+    weight_decay: float = 0.0
+    """Weight decay coefficient for optimizer."""
+    use_layer_norm: bool = False
+    """Use layer normalization in actor/critic networks."""
+    reward_normalization: bool = False
+    """Enable reward normalization using running statistics."""
     
 
 

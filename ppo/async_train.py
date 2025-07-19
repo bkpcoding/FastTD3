@@ -662,9 +662,9 @@ def main():
 
                 # Log to wandb
                 if args.use_wandb:
-                    logs_dict["avg_reward"] = avg_reward
+                    logs_dict["env_rewards"] = avg_reward
                     logs_dict["avg_length"] = avg_length
-                    logs_dict["policy_loss"] = avg_policy_loss
+                    logs_dict["actor_loss"] = avg_policy_loss
                     logs_dict["value_loss"] = avg_value_loss
                     logs_dict["entropy"] = avg_entropy
                     logs_dict["num_episodes"] = num_episodes
@@ -672,9 +672,9 @@ def main():
                     logs_dict["update_time"] = update_time
                     logs_dict["async_efficiency"] = async_efficiency
                     logs_dict["steps_per_second"] = steps_per_second
-                    logs_dict["grad_norm"] = update_metrics["grad_norm"]
+                    logs_dict["actor_grad_norm"] = update_metrics["grad_norm"]
 
-                    policy_norms = calculate_network_norms(policy, "policy")
+                    policy_norms = calculate_network_norms(policy, "actor")
                     logs_dict.update(policy_norms)
 
                     if eval_avg_return is not None:

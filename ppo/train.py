@@ -16,6 +16,7 @@ from fast_td3.fast_td3_utils import EmpiricalNormalization
 # Import architecture based on config flag
 # Will be set after args are parsed
 from .ppo_utils import RolloutBuffer, save_ppo_params
+from .reward_normalizer import RewardNormalizer
 # from .spatial_coverage import SpatialCoverageMetric
 from tensordict import TensorDict
 
@@ -158,8 +159,8 @@ def main():
         n_critic_obs = n_obs
         logger.info(f"Symmetric observations - Actor/Critic: {n_obs}")
 
-    policy = ActorCritic(n_obs, n_act, args.hidden_dim, device=device, n_critic_obs=n_critic_obs)
-    optimizer = optim.Adam(policy.parameters(), lr=args.learning_rate)
+    policy = ActorCritic(n_obs, n_act, args.hidden_dim, device=device, n_critic_obs=n_critic_obs, use_layer_norm=args.use_layer_norm)
+    optimizer = optim.Adam(policy.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     normalizer = EmpiricalNormalization(shape=n_obs, device=device)
     
     # Create separate normalizer for critic observations if asymmetric
@@ -167,6 +168,11 @@ def main():
         critic_normalizer = EmpiricalNormalization(shape=n_critic_obs, device=device)
     else:
         critic_normalizer = normalizer
+    
+    # Initialize reward normalizer if enabled
+    reward_normalizer = None
+    if args.reward_normalization:
+        reward_normalizer = RewardNormalizer(gamma=args.gamma, device=device)
 
     if args.compile:
         policy_act = torch.compile(policy.act)
@@ -227,6 +233,7 @@ def main():
         -args.eval_interval
     )  # Initialize to trigger first evaluation at step 0
     last_save_step = -args.save_interval  # Initialize to trigger first save if needed
+    last_render_step = -args.render_interval  # Initialize to trigger first render if needed
 
     def evaluate():
         """Evaluate the current policy on separate evaluation environments."""
@@ -329,29 +336,32 @@ def main():
                 logger.info(
                     f"*** Evaluation - Avg Return: {eval_avg_return:.3f}, Avg Length: {eval_avg_length:.1f}****"
                 )
-
-                # Render video if requested
-                # print(f"Rendering video at global step {global_step}")
-                # renders = render_with_rollout()
                 if args.use_wandb:
-                    #     wandb.log(
-                    #         {
-                    #             "render_video": wandb.Video(
-                    #                 np.array(renders).transpose(0, 3, 1, 2),  # Convert to (T, C, H, W) format
-                    #                 fps=30,
-                    #                 format="gif",
-                    #             )
-                    #         },
-                    #         step=global_step,
-                    #     )
                     # log the evaluation results
                     wandb.log(
-                        {
+                            {
                             "eval_avg_return": eval_avg_return,
                             "eval_avg_length": eval_avg_length,
                         },
                         step=global_step,
                     )
+
+                # Render video if requested
+                if args.render_interval > 0 and global_step - last_render_step >= args.render_interval:
+                    print(f"Rendering video at global step {global_step}")
+                    renders = render_with_rollout()
+                    last_render_step = global_step
+                    if args.use_wandb:
+                        wandb.log(
+                            {
+                                "render_video": wandb.Video(
+                                    np.array(renders).transpose(0, 3, 1, 2),  # Convert to (T, C, H, W) format
+                                    fps=30,
+                                    format="gif",
+                                )
+                            },
+                            step=global_step,
+                        )
 
             # Data collection phase
             rollout_start_time = time.time()
@@ -371,12 +381,17 @@ def main():
                         action, logp, value = policy_act(norm_obs)
                         
                 next_obs, reward, done, _ = envs.step(action)
+                
+                # Apply reward normalization if enabled
+                if reward_normalizer is not None:
+                    reward = reward_normalizer(reward, done)
+                
                 # Add each environment's transition to buffer
                 buffer.add(obs, action, logp, reward, done, value, critic_obs)
 
                 obs = next_obs
-                global_step += args.num_envs  # Update by number of environments
-                pbar.update(args.num_envs)
+                global_step += 1  
+                pbar.update(1)
 
                 # Track episode statistics
                 current_episode_reward += reward
@@ -395,7 +410,10 @@ def main():
                             num_episodes += 1
                             current_episode_reward[env_idx] = 0
                             current_episode_length[env_idx] = 0
-
+            # reset the envs
+            # obs = envs.reset()
+            # RSLRLBraxWrapper automatically resets the envs
+            # see here: https://github.com/google-deepmind/mujoco_playground/blob/60cf8430011da531e08ce95a6ea48a56e5fbad7c/mujoco_playground/_src/wrapper_torch.py#L118
             rollout_time = time.time() - rollout_start_time
 
             # Compute advantages - handle each environment separately
@@ -559,21 +577,21 @@ def main():
 
             # Log to wandb if enabled
             if args.use_wandb:
-                logs_dict["avg_reward"] = avg_reward
+                logs_dict["env_rewards"] = avg_reward
                 logs_dict["avg_length"] = avg_length
-                logs_dict["policy_loss"] = avg_policy_loss
+                logs_dict["actor_loss"] = avg_policy_loss
                 logs_dict["value_loss"] = avg_value_loss
                 logs_dict["entropy"] = avg_entropy
                 logs_dict["num_episodes"] = num_episodes
                 logs_dict["rollout_time"] = rollout_time
                 logs_dict["update_time"] = update_time
-                logs_dict["grad_norm"] = (
+                logs_dict["actor_grad_norm"] = (
                     grad_norm.item() if "grad_norm" in locals() else 0.0
                 )
                 # logs_dict["spatial_coverage"] = current_coverage
                 # logs_dict["occupied_cells"] = len(coverage_metric.occupied_cells)
 
-                policy_norms = calculate_network_norms(policy, "policy")
+                policy_norms = calculate_network_norms(policy, "actor")
                 logs_dict.update(policy_norms)
 
                 if eval_avg_return is not None:
@@ -581,7 +599,7 @@ def main():
                     logs_dict["eval_avg_length"] = eval_avg_length
 
                 wandb.log(
-                    {"speed": fps, "frame": global_step, **logs_dict}, step=global_step
+                    {"speed": fps, "frame": global_step*args.num_envs, **logs_dict}, step=global_step
                 )
 
             if (

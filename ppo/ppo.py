@@ -24,17 +24,27 @@ def calculate_network_norms(network: nn.Module, prefix: str = ""):
 class Actor(nn.Module):
     """Actor network for PPO with asymmetric observations support."""
 
-    def __init__(self, n_obs: int, n_act: int, hidden_dim: int, device=None):
+    def __init__(self, n_obs: int, n_act: int, hidden_dim: int, device=None, use_layer_norm: bool = False):
         super().__init__()
         self.device = device
+        self.use_layer_norm = use_layer_norm
 
-        self.actor_net = nn.Sequential(
-            nn.Linear(n_obs, hidden_dim, device=device),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim // 2, device=device),
-            nn.ReLU(),
-            nn.Linear(hidden_dim // 2, hidden_dim // 4, device=device),
-        )
+        layers = []
+        layers.append(nn.Linear(n_obs, hidden_dim, device=device))
+        if use_layer_norm:
+            layers.append(nn.LayerNorm(hidden_dim, device=device))
+        layers.append(nn.ReLU())
+        
+        layers.append(nn.Linear(hidden_dim, hidden_dim // 2, device=device))
+        if use_layer_norm:
+            layers.append(nn.LayerNorm(hidden_dim // 2, device=device))
+        layers.append(nn.ReLU())
+        
+        layers.append(nn.Linear(hidden_dim // 2, hidden_dim // 4, device=device))
+        if use_layer_norm:
+            layers.append(nn.LayerNorm(hidden_dim // 4, device=device))
+        
+        self.actor_net = nn.Sequential(*layers)
         self.mu = nn.Linear(hidden_dim // 4, n_act, device=device)
         self.log_std = nn.Parameter(torch.zeros(n_act, device=device) - 0.5)
 
@@ -66,19 +76,30 @@ class Actor(nn.Module):
 class Critic(nn.Module):
     """Critic network for PPO with asymmetric observations support."""
 
-    def __init__(self, n_critic_obs: int, hidden_dim: int, device=None):
+    def __init__(self, n_critic_obs: int, hidden_dim: int, device=None, use_layer_norm: bool = False):
         super().__init__()
         self.device = device
+        self.use_layer_norm = use_layer_norm
 
-        self.critic_net = nn.Sequential(
-            nn.Linear(n_critic_obs, hidden_dim, device=device),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim // 2, device=device),
-            nn.ReLU(),
-            nn.Linear(hidden_dim // 2, hidden_dim // 4, device=device),
-            nn.ReLU(),
-            nn.Linear(hidden_dim // 4, 1, device=device),
-        )
+        layers = []
+        layers.append(nn.Linear(n_critic_obs, hidden_dim, device=device))
+        if use_layer_norm:
+            layers.append(nn.LayerNorm(hidden_dim, device=device))
+        layers.append(nn.ReLU())
+        
+        layers.append(nn.Linear(hidden_dim, hidden_dim // 2, device=device))
+        if use_layer_norm:
+            layers.append(nn.LayerNorm(hidden_dim // 2, device=device))
+        layers.append(nn.ReLU())
+        
+        layers.append(nn.Linear(hidden_dim // 2, hidden_dim // 4, device=device))
+        if use_layer_norm:
+            layers.append(nn.LayerNorm(hidden_dim // 4, device=device))
+        layers.append(nn.ReLU())
+        
+        layers.append(nn.Linear(hidden_dim // 4, 1, device=device))
+        
+        self.critic_net = nn.Sequential(*layers)
 
     def value(self, critic_obs: torch.Tensor) -> torch.Tensor:
         return self.critic_net(critic_obs).squeeze(-1)
@@ -87,17 +108,17 @@ class Critic(nn.Module):
 class ActorCritic(nn.Module):
     """Combined actor-critic network with asymmetric observations support."""
 
-    def __init__(self, n_obs: int, n_act: int, hidden_dim: int, device=None, n_critic_obs: int = None):
+    def __init__(self, n_obs: int, n_act: int, hidden_dim: int, device=None, n_critic_obs: int = None, use_layer_norm: bool = False):
         super().__init__()
         self.device = device
         self.asymmetric_obs = n_critic_obs is not None and n_critic_obs != n_obs
         
         # Actor uses regular observations
-        self.actor = Actor(n_obs, n_act, hidden_dim, device)
+        self.actor = Actor(n_obs, n_act, hidden_dim, device, use_layer_norm)
         
         # Critic uses privileged observations if available, otherwise regular observations
         critic_obs_size = n_critic_obs if self.asymmetric_obs else n_obs
-        self.critic = Critic(critic_obs_size, hidden_dim, device)
+        self.critic = Critic(critic_obs_size, hidden_dim, device, use_layer_norm)
 
     def get_dist(self, obs: torch.Tensor) -> Normal:
         return self.actor.get_dist(obs)
