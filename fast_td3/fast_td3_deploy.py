@@ -61,13 +61,13 @@ class Policy(nn.Module):
         self.actor.eval()
         self.obs_normalizer.eval()
 
-    @torch.no_grad
+    @torch.no_grad()
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         norm_obs = self.obs_normalizer(obs)
         actions = self.actor(norm_obs)
         return actions
 
-    @torch.no_grad
+    @torch.no_grad()
     def act(self, obs: torch.Tensor) -> torch.distributions.Normal:
         actions = self.forward(obs)
         return torch.distributions.Normal(actions, torch.ones_like(actions) * 1e-8)

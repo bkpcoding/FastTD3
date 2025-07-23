@@ -1,4 +1,7 @@
 import os
+import glob
+import pickle
+import re
 
 from typing import Optional
 
@@ -71,6 +74,9 @@ class SimpleReplayBuffer(nn.Module):
                     device=device,
                     dtype=torch.float,
                 )
+                self.privileged_state = torch.zeros(
+                    (n_env, buffer_size, n_critic_obs), device=device, dtype=torch.float
+                )
                 self.next_privileged_observations = torch.zeros(
                     (n_env, buffer_size, self.privileged_obs_size),
                     device=device,
@@ -97,6 +103,7 @@ class SimpleReplayBuffer(nn.Module):
         dones = tensor_dict["next"]["dones"]
         truncations = tensor_dict["next"]["truncations"]
         next_observations = tensor_dict["next"]["observations"]
+        privileged_state = tensor_dict["privileged_state"]
 
         ptr = self.ptr % self.buffer_size
         self.observations[:, ptr] = observations
@@ -115,6 +122,8 @@ class SimpleReplayBuffer(nn.Module):
                 next_privileged_observations = next_critic_observations[:, self.n_obs :]
                 self.privileged_observations[:, ptr] = privileged_observations
                 self.next_privileged_observations[:, ptr] = next_privileged_observations
+                # TODO: Optimize this to only store previleged observation once
+                self.privileged_state[:, ptr] = privileged_state
             else:
                 # Store full critic observations
                 self.critic_observations[:, ptr] = critic_observations
@@ -811,3 +820,197 @@ def load_ddp_state_dict(model, state_dict):
 def mark_step():
     # call this once per iteration *before* any compiled function
     torch.compiler.cudagraph_mark_step_begin()
+
+
+class PrivilegedStateBuffer:
+    """Buffer for loading and sampling privileged states from saved pickle files."""
+    
+    def __init__(
+        self,
+        output_dir: str,
+        run_name: str = None,
+        device: torch.device = None,
+        priority_alpha: float = 0.6,
+        max_samples: int = None,
+        max_files: int = None
+    ):
+        """Initialize privileged state buffer from pickle files.
+        
+        Args:
+            output_dir: Directory containing buffer snapshot files
+            run_name: Optional run name filter for files
+            device: Device to store tensors on
+            priority_alpha: Priority exponent for reward-based sampling (0 = uniform, 1 = proportional)
+            max_samples: Maximum number of top-reward samples to keep (keeps all if None)
+            max_files: Maximum number of files to load (loads most recent if specified)
+        """
+        self.device = device or torch.device('cpu')
+        self.priority_alpha = priority_alpha
+        self.max_samples = max_samples
+        
+        # Load buffer snapshots
+        snapshots = self._load_buffer_snapshots(output_dir, run_name, max_files)
+        
+        # Process and concatenate all privileged states and rewards
+        self.privileged_states, self.rewards, self.priorities = self._process_snapshots(snapshots)
+        self.total_states = len(self.privileged_states)
+        
+        print(f"Loaded {self.total_states} privileged states from {len(snapshots)} files")
+        print(f"Privileged state shape: {self.privileged_states.shape}")
+        print(f"Privileged state range: [{self.privileged_states.min():.3f}, {self.privileged_states.max():.3f}]")
+        print(f"Reward range: [{self.rewards.min():.3f}, {self.rewards.max():.3f}]")
+        
+        # Check for extreme values that might cause issues
+        if torch.any(torch.abs(self.privileged_states) > 1000):
+            print(f"WARNING: Found privileged states with extreme values > 1000!")
+            extreme_mask = torch.abs(self.privileged_states) > 1000
+            print(f"Number of extreme values: {extreme_mask.sum().item()}")
+            print(f"Max absolute value: {torch.abs(self.privileged_states).max().item():.1f}")
+        
+    def _load_buffer_snapshots(self, output_dir: str, run_name: str = None, max_files: int = None):
+        """Load all buffer snapshots from the output directory."""
+        
+        # Find all buffer snapshot files
+        if run_name:
+            pattern = f"{output_dir}/{run_name}_buffer_snapshot_*.pkl"
+        else:
+            pattern = f"{output_dir}/*_buffer_snapshot_*.pkl"
+        
+        snapshot_files = glob.glob(pattern)
+        snapshot_files.sort()
+        
+        if not snapshot_files:
+            raise ValueError(f"No buffer snapshot files found in {output_dir}")
+        
+        # Limit number of files if specified (keep most recent)
+        if max_files is not None and len(snapshot_files) > max_files:
+            snapshot_files = snapshot_files[-max_files:]
+        
+        snapshots = []
+        for file_path in snapshot_files:
+            # Extract global step from filename
+            match = re.search(r'_buffer_snapshot_(\d+)\.pkl', file_path)
+            if match:
+                global_step = int(match.group(1))
+                
+                with open(file_path, 'rb') as f:
+                    data = pickle.load(f)
+                
+                # Determine if this is a single agent run based on filename
+                is_single_agent = '_hyperparams__1_' in file_path
+                
+                snapshots.append({
+                    'global_step': global_step,
+                    'privileged_state': data['privileged_state'],
+                    'rewards': data.get('rewards', None),  # Handle backward compatibility
+                    'metadata': data['_metadata'],
+                    'file_path': file_path,
+                    'is_single_agent': is_single_agent
+                })
+        
+        # Sort by global step
+        snapshots.sort(key=lambda x: x['global_step'])
+        print(f"Loaded {len(snapshots)} buffer snapshots")
+        
+        return snapshots
+    
+    def _process_snapshots(self, snapshots):
+        """Process snapshots to extract privileged states and rewards."""
+        all_privileged_states = []
+        all_rewards = []
+        
+        for snapshot in snapshots:
+            privileged_state = snapshot['privileged_state']
+            rewards = snapshot['rewards']
+            
+            if rewards is None:
+                print(f"Warning: No rewards found in {snapshot['file_path']}, skipping")
+                continue
+                
+            # Convert to torch tensors
+            if isinstance(privileged_state, dict) and 'privileged_state' in privileged_state:
+                # Handle dict format with privileged states
+                privileged = torch.tensor(privileged_state['privileged_state'], dtype=torch.float32)
+            elif hasattr(privileged_state, 'shape') and len(privileged_state.shape) >= 2:
+                # Handle array format - assume it's already privileged states
+                privileged = torch.tensor(privileged_state, dtype=torch.float32)
+            else:
+                print(f"Warning: Unsupported observation format in {snapshot['file_path']}, skipping")
+                continue
+                
+            reward_tensor = torch.tensor(rewards, dtype=torch.float32)
+            
+            # Flatten if needed (remove env dimension if present)
+            if len(privileged.shape) == 3:  # [n_env, buffer_size, obs_size]
+                privileged = privileged.view(-1, privileged.shape[-1])
+                reward_tensor = reward_tensor.view(-1)
+                
+            if len(privileged) > 0:  # Only add if we have valid states
+                all_privileged_states.append(privileged)
+                all_rewards.append(reward_tensor)
+        
+        if not all_privileged_states:
+            raise ValueError("No valid privileged states found in any snapshot files")
+        
+        # Concatenate all data
+        privileged_states = torch.cat(all_privileged_states, dim=0)
+        rewards = torch.cat(all_rewards, dim=0)
+        
+        # Sort by reward and keep only top samples if specified
+        if self.max_samples is not None and len(privileged_states) > self.max_samples:
+            # Sort by reward (descending) and keep top samples
+            sorted_indices = torch.argsort(rewards, descending=True)[:self.max_samples]
+            privileged_states = privileged_states[sorted_indices]
+            rewards = rewards[sorted_indices]
+            print(f"Kept top {self.max_samples} samples by reward (range: [{rewards.min():.3f}, {rewards.max():.3f}])")
+        
+        # Move to device
+        privileged_states = privileged_states.to(self.device)
+        rewards = rewards.to(self.device)
+        
+        # Compute priorities based on reward magnitude
+        priorities = torch.abs(rewards) + 1e-6  # Small epsilon to avoid zero priorities
+        
+        return privileged_states, rewards, priorities
+    
+    def sample(self, batch_size: int, use_prioritized: bool = True) -> torch.Tensor:
+        """Sample privileged states from the buffer.
+        
+        Args:
+            batch_size: Number of states to sample
+            use_prioritized: Whether to use reward-based prioritized sampling
+            
+        Returns:
+            Tensor of privileged states [batch_size, privileged_obs_size]
+        """
+        if batch_size > self.total_states:
+            # If we don't have enough states, sample with replacement
+            batch_size = min(batch_size, self.total_states)
+            
+        if use_prioritized and self.priority_alpha > 0:
+            # Reward-based prioritized sampling
+            powered_priorities = torch.pow(self.priorities, self.priority_alpha)
+            # Normalize to get probabilities
+            probs = powered_priorities / (powered_priorities.sum() + 1e-8)
+            
+            # Sample indices using multinomial sampling
+            indices = torch.multinomial(probs, batch_size, replacement=True)
+        else:
+            # Uniform sampling
+            indices = torch.randint(0, self.total_states, (batch_size,), device=self.device)
+        
+        return self.privileged_states[indices]
+    
+    def get_stats(self):
+        """Get statistics about the loaded data."""
+        return {
+            'total_states': self.total_states,
+            'privileged_state_shape': tuple(self.privileged_states.shape),
+            'reward_mean': self.rewards.mean().item(),
+            'reward_std': self.rewards.std().item(),
+            'reward_min': self.rewards.min().item(),
+            'reward_max': self.rewards.max().item(),
+            'priority_alpha': self.priority_alpha,
+            'max_samples': self.max_samples,
+            'device': str(self.device)
+        }

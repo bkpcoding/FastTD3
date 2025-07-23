@@ -14,6 +14,7 @@ os.environ["XLA_FLAGS"] = "--xla_gpu_triton_gemm_any=True"  # Enable triton gemm
 import random
 import time
 import math
+import pickle
 
 import tqdm
 import wandb
@@ -30,19 +31,21 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.amp import autocast, GradScaler
+# from torch.cuda.amp import autocast, GradScaler
 
 from tensordict import TensorDict
 
-from fast_td3_utils import (
+from fast_td3.fast_td3_utils import (
     EmpiricalNormalization,
     RewardNormalizer,
     PerTaskRewardNormalizer,
     SimpleReplayBuffer,
+    PrivilegedStateBuffer,
     save_params,
     mark_step,
 )
-from hyperparams import get_args
-from fast_td3 import Actor, Critic, calculate_network_norms
+from fast_td3.hyperparams import get_args
+from fast_td3.fast_td3 import Actor, Critic, calculate_network_norms
 
 torch.set_float32_matmul_precision("high")
 import torch._dynamo
@@ -52,6 +55,13 @@ try:
     import jax.numpy as jnp
 except ImportError:
     pass
+import jax
+# set the cache
+jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
+jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
+jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
+# jax.config.update("jax_persistent_cache_enable_xla_caches", "xla_gpu_per_fusion_autotune_cache_dir")
+
 
 
 def main():
@@ -93,8 +103,25 @@ def main():
             raise ValueError("No GPU available")
     print(f"Using device: {device}")
 
+
+    # Create privileged state buffer if specified
+    privileged_buffer = None
+    if args.use_privileged_buffer and (args.env_name.startswith("T1") or args.env_name.startswith("G1")):
+        print(f"Loading privileged state buffer from {args.privileged_buffer_dir}")
+        privileged_buffer = PrivilegedStateBuffer(
+            output_dir=args.privileged_buffer_dir,
+            run_name=args.privileged_buffer_run_name,
+            device=device,
+            priority_alpha=args.privileged_buffer_priority_alpha,
+            max_samples=args.privileged_buffer_max_samples,
+            max_files=args.privileged_buffer_max_files
+        )
+        print("Privileged state buffer stats:")
+        for key, value in privileged_buffer.get_stats().items():
+            print(f"  {key}: {value}")
+    
     if args.env_name.startswith("h1hand-") or args.env_name.startswith("h1-"):
-        from environments.humanoid_bench_env import HumanoidBenchEnv
+        from fast_td3.environments.humanoid_bench_env import HumanoidBenchEnv
 
         env_type = "humanoid_bench"
         envs = HumanoidBenchEnv(args.env_name, args.num_envs, device=device)
@@ -103,7 +130,7 @@ def main():
             args.env_name, 1, render_mode="rgb_array", device=device
         )
     elif args.env_name.startswith("Isaac-"):
-        from environments.isaaclab_env import IsaacLabEnv
+        from fast_td3.environments.isaaclab_env import IsaacLabEnv
 
         env_type = "isaaclab"
         envs = IsaacLabEnv(
@@ -116,7 +143,7 @@ def main():
         eval_envs = envs
         render_env = envs
     elif args.env_name.startswith("MTBench-"):
-        from environments.mtbench_env import MTBenchEnv
+        from fast_td3.environments.mtbench_env import MTBenchEnv
 
         env_name = "-".join(args.env_name.split("-")[1:])
         env_type = "mtbench"
@@ -124,7 +151,7 @@ def main():
         eval_envs = envs
         render_env = envs
     else:
-        from environments.mujoco_playground_env import make_env
+        from fast_td3.environments.mujoco_playground_env import make_env
 
         # TODO: Check if re-using same envs for eval could reduce memory usage
         env_type = "mujoco_playground"
@@ -137,11 +164,15 @@ def main():
             use_tuned_reward=args.use_tuned_reward,
             use_domain_randomization=args.use_domain_randomization,
             use_push_randomization=args.use_push_randomization,
+            privileged_buffer=privileged_buffer,
+            reset_prob=args.privileged_buffer_reset_prob,
+            priority_alpha=args.privileged_buffer_priority_alpha,
+            random_initial_state=args.random_initial_state,
         )
 
     n_act = envs.num_actions
     n_obs = envs.num_obs if type(envs.num_obs) == int else envs.num_obs[0]
-    if envs.asymmetric_obs:
+    if envs.asymmetric_obs and args.enable_asymmetric_obs:
         n_critic_obs = (
             envs.num_privileged_obs
             if type(envs.num_privileged_obs) == int
@@ -150,6 +181,19 @@ def main():
     else:
         n_critic_obs = n_obs
     action_low, action_high = -1.0, 1.0
+
+    rb = SimpleReplayBuffer(
+        n_env=args.num_envs,
+        buffer_size=args.buffer_size,
+        n_obs=n_obs,
+        n_act=n_act,
+        n_critic_obs=n_critic_obs,
+        asymmetric_obs=envs.asymmetric_obs and args.enable_asymmetric_obs,
+        playground_mode=env_type == "mujoco_playground",
+        n_steps=args.num_steps,
+        gamma=args.gamma,
+        device=device,
+        )
 
     if args.obs_normalization:
         obs_normalizer = EmpiricalNormalization(shape=n_obs, device=device)
@@ -295,18 +339,6 @@ def main():
         eta_min=torch.tensor(args.actor_learning_rate_end, device=device),
     )
 
-    rb = SimpleReplayBuffer(
-        n_env=args.num_envs,
-        buffer_size=args.buffer_size,
-        n_obs=n_obs,
-        n_act=n_act,
-        n_critic_obs=n_critic_obs,
-        asymmetric_obs=envs.asymmetric_obs,
-        playground_mode=env_type == "mujoco_playground",
-        n_steps=args.num_steps,
-        gamma=args.gamma,
-        device=device,
-    )
 
     policy_noise = args.policy_noise
     noise_clip = args.noise_clip
@@ -393,7 +425,7 @@ def main():
         ):
             observations = data["observations"]
             next_observations = data["next"]["observations"]
-            if envs.asymmetric_obs:
+            if envs.asymmetric_obs and args.enable_asymmetric_obs:
                 critic_observations = data["critic_observations"]
                 next_critic_observations = data["next"]["critic_observations"]
             else:
@@ -479,7 +511,7 @@ def main():
         ):
             critic_observations = (
                 data["critic_observations"]
-                if envs.asymmetric_obs
+                if envs.asymmetric_obs and args.enable_asymmetric_obs
                 else data["observations"]
             )
 
@@ -533,7 +565,7 @@ def main():
             update_stats = reward_normalizer.update_stats
         normalize_reward = reward_normalizer.forward
 
-    if envs.asymmetric_obs:
+    if envs.asymmetric_obs and args.enable_asymmetric_obs:
         obs, critic_obs = envs.reset_with_critic_obs()
         critic_obs = torch.as_tensor(critic_obs, device=device, dtype=torch.float)
     else:
@@ -558,6 +590,8 @@ def main():
     pbar = tqdm.tqdm(total=args.total_timesteps, initial=global_step)
     start_time = None
     desc = ""
+    last_eval_step = global_step
+    last_buffer_snapshot_step = global_step
 
     while global_step < args.total_timesteps:
         mark_step()
@@ -574,10 +608,8 @@ def main():
         ):
             norm_obs = normalize_obs(obs)
             actions = policy(obs=norm_obs, dones=dones)
-
         next_obs, rewards, dones, infos = envs.step(actions.float())
         truncations = infos["time_outs"]
-
         if args.reward_normalization:
             if env_type == "mtbench":
                 task_ids_one_hot = obs[..., -envs.num_tasks :]
@@ -586,13 +618,13 @@ def main():
             else:
                 update_stats(rewards, dones.float())
 
-        if envs.asymmetric_obs:
+        if envs.asymmetric_obs and args.enable_asymmetric_obs:
             next_critic_obs = infos["observations"]["critic"]
         # Compute 'true' next_obs and next_critic_obs for saving
         true_next_obs = torch.where(
             dones[:, None] > 0, infos["observations"]["raw"]["obs"], next_obs
         )
-        if envs.asymmetric_obs:
+        if envs.asymmetric_obs and args.enable_asymmetric_obs:
             true_next_critic_obs = torch.where(
                 dones[:, None] > 0,
                 infos["observations"]["raw"]["critic_obs"],
@@ -611,17 +643,20 @@ def main():
                     "truncations": truncations.long(),
                     "dones": dones.long(),
                 },
+                # "full_state": envs.save_state() # too expensive to save
             },
             batch_size=(envs.num_envs,),
             device=device,
         )
-        if envs.asymmetric_obs:
+        privileged_state = infos["observations"]["raw"]["critic_obs"]
+        if envs.asymmetric_obs and args.enable_asymmetric_obs:
             transition["critic_observations"] = critic_obs
             transition["next"]["critic_observations"] = true_next_critic_obs
+            transition["privileged_state"] = privileged_state
         rb.extend(transition)
 
         obs = next_obs
-        if envs.asymmetric_obs:
+        if envs.asymmetric_obs and args.enable_asymmetric_obs:
             critic_obs = next_critic_obs
 
         if global_step > args.learning_starts:
@@ -631,7 +666,7 @@ def main():
                 data["next"]["observations"] = normalize_obs(
                     data["next"]["observations"]
                 )
-                if envs.asymmetric_obs:
+                if envs.asymmetric_obs and args.enable_asymmetric_obs:
                     data["critic_observations"] = normalize_critic_obs(
                         data["critic_observations"]
                     )
@@ -661,7 +696,8 @@ def main():
 
             if global_step % 100 == 0 and start_time is not None:
                 speed = (global_step - measure_burnin) / (time.time() - start_time)
-                pbar.set_description(f"{speed: 4.4f} sps, " + desc)
+                # pbar.set_description(f"{speed: 4.4f} sps, " + desc)
+                pbar.set_description(f"{speed*args.num_envs: 4.4f} fps, " + desc)
                 with torch.no_grad():
                     logs = {
                         "actor_loss": logs_dict["actor_loss"].mean(),
@@ -686,7 +722,10 @@ def main():
                     logs.update(critic_norms)
                     logs.update(target_critic_norms)
 
-                    if args.eval_interval > 0 and global_step % args.eval_interval == 0:
+                    if (
+                        args.eval_interval > 0
+                        and global_step - last_eval_step >= args.eval_interval
+                    ):
                         print(f"Evaluating at global step {global_step}")
                         eval_avg_return, eval_avg_length = evaluate()
                         if env_type in ["humanoid_bench", "isaaclab", "mtbench"]:
@@ -694,6 +733,7 @@ def main():
                             obs = envs.reset()
                         logs["eval_avg_return"] = eval_avg_return
                         logs["eval_avg_length"] = eval_avg_length
+                        last_eval_step = global_step
 
                     if (
                         args.render_interval > 0
@@ -711,7 +751,7 @@ def main():
                 if args.use_wandb:
                     wandb.log(
                         {
-                            "speed": speed,
+                            "speed": speed*args.num_envs,
                             "frame": global_step * args.num_envs,
                             "critic_lr": q_scheduler.get_last_lr()[0],
                             "actor_lr": actor_scheduler.get_last_lr()[0],
@@ -736,6 +776,32 @@ def main():
                     args,
                     f"{args.output_dir}/{run_name}_{global_step}.pt",
                 )
+            
+            if (
+                args.buffer_snapshot_interval > 0
+                and global_step - last_buffer_snapshot_step >= args.buffer_snapshot_interval
+            ):
+                print(f"Saving replay buffer snapshot at global step {global_step}")
+                
+                # Create a copy of the buffer data on CPU - observations and rewards
+                buffer_snapshot = {
+                    'privileged_state': rb.privileged_state.cpu(),
+                    'rewards': rb.rewards.cpu(),
+                    # 'full_state': rb.full_state.cpu(),
+                    '_metadata': {
+                        'buffer_size': rb.buffer_size,
+                        'ptr': rb.ptr.cpu() if hasattr(rb.ptr, 'cpu') else rb.ptr,
+                        'n_env': rb.n_env,
+                        'global_step': global_step,
+                    }
+                }
+                
+                # Save to pickle file
+                snapshot_path = f"{args.output_dir}/{run_name}_buffer_snapshot_{global_step}.pkl"
+                with open(snapshot_path, 'wb') as f:
+                    pickle.dump(buffer_snapshot, f)
+                
+                last_buffer_snapshot_step = global_step
 
         global_step += 1
         actor_scheduler.step()

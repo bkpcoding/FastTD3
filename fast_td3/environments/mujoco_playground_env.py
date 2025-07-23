@@ -83,6 +83,10 @@ def make_env(
     use_tuned_reward=False,
     use_domain_randomization=False,
     use_push_randomization=False,
+    privileged_buffer=None,
+    reset_prob=0.5,
+    priority_alpha=0.6,
+    random_initial_state=False,
 ):
     # Make training environment
     train_env_cfg = registry.get_default_config(env_name)
@@ -122,6 +126,8 @@ def make_env(
         train_env_cfg.action_repeat,
         randomization_fn=randomizer,
         device_rank=device_rank,
+        privileged_buffer=privileged_buffer,
+        random_initial_state=random_initial_state,
     )
 
     # Make evaluation environment

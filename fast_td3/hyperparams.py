@@ -22,19 +22,19 @@ class BaseArgs:
     """the rank of the device"""
     exp_name: str = os.path.basename(__file__)[: -len(".py")]
     """the name of this experiment"""
-    project: str = "rl_scratch"
+    project: str = "MJX"
     """the project name"""
-    use_wandb: bool = True
+    use_wandb: bool = False
     """whether to use wandb"""
     checkpoint_path: str = None
     """the path to the checkpoint file"""
-    output_dir: str = None
+    output_dir: str = "./output"
     """the path to the output directory"""
-    num_envs: int = 128  # 48 on 6 core cpu (for humanoid bench, mjx doesn't require cpu)
+    num_envs: int = 1024  # 48 on 6 core cpu (for humanoid bench, mjx doesn't require cpu)
     """the number of environments to run in parallel"""
-    num_eval_envs: int = 128
+    num_eval_envs: int = 1024
     """the number of evaluation environments to run in parallel (only valid for MuJoCo Playground)"""
-    total_timesteps: int = 1500000
+    total_timesteps: int = 10000
     """total timesteps of the experiments"""
     critic_learning_rate: float = 3e-4
     """the learning rate of the critic"""
@@ -76,9 +76,9 @@ class BaseArgs:
     """the minimum value of the support"""
     v_max: float = 250.0
     """the maximum value of the support"""
-    critic_hidden_dim: int = 1024
+    critic_hidden_dim: int = 256    # original was 1024
     """the hidden dimension of the critic network"""
-    actor_hidden_dim: int = 512
+    actor_hidden_dim: int = 256    # original was 512
     """the hidden dimension of the actor network"""
     critic_num_blocks: int = 2
     """(SimbaV2 only) the number of blocks in the critic network"""
@@ -90,7 +90,7 @@ class BaseArgs:
     """Number of burn-in iterations for speed measure."""
     eval_interval: int = 10000
     """the interval to evaluate the model"""
-    render_interval: int = 10000
+    render_interval: int = 0
     """the interval to render the model"""
     compile: bool = True
     """whether to use torch.compile."""
@@ -98,6 +98,8 @@ class BaseArgs:
     """the mode of torch.compile."""
     obs_normalization: bool = True
     """whether to enable observation normalization"""
+    enable_asymmetric_obs: bool = True
+    """Enable asymmetric actor-critic observations (if environment supports it)."""
     reward_normalization: bool = False
     """whether to enable reward normalization"""
     use_grad_norm_clipping: bool = False
@@ -122,10 +124,30 @@ class BaseArgs:
     task_embedding_dim: int = 32
     """the dimension of the task embedding"""
 
-    weight_decay: float = 0.1
+    weight_decay: float = 0.0
     """the weight decay of the optimizer"""
-    save_interval: int = 5000
+    save_interval: int = 0
     """the interval to save the model"""
+    buffer_snapshot_interval: int = 0
+    """the interval to save replay buffer snapshots (0 to disable)"""
+    random_initial_state: bool = False
+    """whether to use random initial state"""
+    
+    # Privileged state buffer parameters
+    use_privileged_buffer: bool = False
+    """whether to use privileged state buffer"""
+    privileged_buffer_dir: str = 'output_test_single'
+    """directory containing privileged state buffer snapshots (None to disable)"""
+    privileged_buffer_run_name: str = None
+    """run name filter for privileged buffer files (None for all files)"""
+    privileged_buffer_max_samples: int = 100000
+    """maximum number of top-reward samples to keep from privileged buffer"""
+    privileged_buffer_max_files: int = 10
+    """maximum number of most recent buffer files to load"""
+    privileged_buffer_priority_alpha: float = 0.6
+    """priority exponent for privileged state sampling (0=uniform, 1=proportional)"""
+    privileged_buffer_reset_prob: float = 0.5
+    """probability of using privileged state reset vs normal reset (0.5 = 50%)"""
 
 
 def get_args():
@@ -442,8 +464,8 @@ class IsaacLabArgs(BaseArgs):
     v_min: float = -10.0
     v_max: float = 10.0
     buffer_size: int = 1024 * 10
-    num_envs: int = 4096
-    num_eval_envs: int = 4096
+    num_envs: int = 1024
+    num_eval_envs: int = 1024
     action_bounds: float = 1.0
     std_max: float = 0.4
     num_atoms: int = 251
