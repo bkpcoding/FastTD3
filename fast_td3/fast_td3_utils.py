@@ -103,7 +103,6 @@ class SimpleReplayBuffer(nn.Module):
         dones = tensor_dict["next"]["dones"]
         truncations = tensor_dict["next"]["truncations"]
         next_observations = tensor_dict["next"]["observations"]
-        privileged_state = tensor_dict["privileged_state"]
 
         ptr = self.ptr % self.buffer_size
         self.observations[:, ptr] = observations
@@ -118,6 +117,7 @@ class SimpleReplayBuffer(nn.Module):
 
             if self.playground_mode:
                 # Extract and store only the privileged part
+                privileged_state = tensor_dict["privileged_state"]
                 privileged_observations = critic_observations[:, self.n_obs :]
                 next_privileged_observations = next_critic_observations[:, self.n_obs :]
                 self.privileged_observations[:, ptr] = privileged_observations

@@ -53,15 +53,14 @@ import torch._dynamo
 torch._dynamo.config.suppress_errors = True
 try:
     import jax.numpy as jnp
+    import jax
+    # set the cache
+    jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
+    jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
+    jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
+    # jax.config.update("jax_persistent_cache_enable_xla_caches", "xla_gpu_per_fusion_autotune_cache_dir")
 except ImportError:
     pass
-import jax
-# set the cache
-jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
-jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
-jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
-# jax.config.update("jax_persistent_cache_enable_xla_caches", "xla_gpu_per_fusion_autotune_cache_dir")
-
 
 
 def main():
@@ -150,6 +149,15 @@ def main():
         envs = MTBenchEnv(env_name, args.device_rank, args.num_envs, args.seed)
         eval_envs = envs
         render_env = envs
+    elif args.env_name.startswith("Maniskill-"):
+        from fast_td3.environments.maniskill_env import ManiskillEnv
+
+        env_type = "maniskill"
+        # remove the Maniskill- prefix
+        env_name = args.env_name[len("Maniskill-"):]
+        envs = ManiskillEnv(env_name, args.num_envs, args.seed)
+        eval_envs = envs
+        render_env = ManiskillEnv(env_name, 1, args.seed)
     else:
         from fast_td3.environments.mujoco_playground_env import make_env
 
@@ -393,6 +401,9 @@ def main():
             raise NotImplementedError(
                 "We don't support rendering for IsaacLab and MTBench environments"
             )
+        elif env_type == "maniskill":
+            obs = render_env.reset()
+            renders =[render_env.env.render_rgb_array().cpu().squeeze(0)]
         else:
             obs = render_env.reset()
             render_env.state.info["command"] = jnp.array([[1.0, 0.0, 0.0]])
@@ -401,7 +412,11 @@ def main():
             with torch.no_grad(), autocast(
                 device_type=amp_device_type, dtype=amp_dtype, enabled=amp_enabled
             ):
-                obs = normalize_obs(obs, update=False)
+                try:
+                    obs = normalize_obs(obs, update=False)
+                except RuntimeError:
+                    obs = obs.to(amp_device_type)
+                    obs = normalize_obs(obs, update=False)
                 actions = actor(obs)
             next_obs, _, done, _ = render_env.step(actions.float())
             if env_type == "mujoco_playground":
@@ -409,12 +424,13 @@ def main():
             if i % 2 == 0:
                 if env_type == "humanoid_bench":
                     renders.append(render_env.render())
+                elif env_type == "maniskill":
+                    renders.append(render_env.env.render_rgb_array().cpu().squeeze(0))
                 else:
                     renders.append(render_env.state)
             if done.any():
                 break
             obs = next_obs
-
         if env_type == "mujoco_playground":
             renders = render_env.render_trajectory(renders)
         return renders
@@ -648,8 +664,8 @@ def main():
             batch_size=(envs.num_envs,),
             device=device,
         )
-        privileged_state = infos["observations"]["raw"]["critic_obs"]
         if envs.asymmetric_obs and args.enable_asymmetric_obs:
+            privileged_state = infos["observations"]["raw"]["critic_obs"]
             transition["critic_observations"] = critic_obs
             transition["next"]["critic_observations"] = true_next_critic_obs
             transition["privileged_state"] = privileged_state

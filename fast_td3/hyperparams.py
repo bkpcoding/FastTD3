@@ -88,11 +88,11 @@ class BaseArgs:
     """whether to use Clipped Double Q-learning"""
     measure_burnin: int = 3
     """Number of burn-in iterations for speed measure."""
-    eval_interval: int = 10000
+    eval_interval: int = 5000
     """the interval to evaluate the model"""
     render_interval: int = 0
     """the interval to render the model"""
-    compile: bool = True
+    compile: bool = False
     """whether to use torch.compile."""
     compile_mode: str = "reduce-overhead"
     """the mode of torch.compile."""

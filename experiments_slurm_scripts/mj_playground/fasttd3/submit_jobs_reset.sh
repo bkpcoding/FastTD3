@@ -67,17 +67,17 @@ EOF
         # Command with random initial state
         cat >> "job_${env_name}.slurm" << EOF
 # Run the training
-python -m fast_td3.train \\ 
+python -m fast_td3.train \\
     --env_name ${env_name} \\
     --buffer_snapshot_interval 0 \\
     --output_dir output_single \\
-    --num_envs 128 \\
+    --num_envs 1024 \\
     --buffer_size ${buffer_size} \\
     --total_timesteps 100000 \\
     --eval_interval 5000 \\
     --project MJX_Multi \\
     --random_initial_state \\
-    --use_wandb --exp_name random_reset_buffer_10k_env_128 --render_interval 5000 --seed 524
+    --use_wandb --exp_name random_reset_buffer_10k_env_1024 --render_interval 5000 --seed 524
 EOF
     else
         # Command without privileged buffer or random initial state
@@ -109,7 +109,7 @@ EOF
 # Submit jobs for all environments
 # submit_job "G1JoystickFlatTerrain"
 #submit_job "G1JoystickRoughTerrain"
-submit_job "T1JoystickFlatTerrain" 10000 "false" "true"
+submit_job "T1JoystickFlatTerrain" 10240 "false" "true"
 # submit_job "T1JoystickFlatTerrain" 10240 "false"
 # submit_job "T1JoystickFlatTerrain" "10240"
 # submit_job "T1JoystickFlatTerrain" "50480"
