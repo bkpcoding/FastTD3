@@ -105,7 +105,7 @@ def main():
 
     # Create privileged state buffer if specified
     privileged_buffer = None
-    if args.use_privileged_buffer and (args.env_name.startswith("T1") or args.env_name.startswith("G1")):
+    if args.use_privileged_buffer and (args.env_name.startswith("T1") or args.env_name.startswith("G1") or args.env_name.startswith("Maniskill-")):
         print(f"Loading privileged state buffer from {args.privileged_buffer_dir}")
         privileged_buffer = PrivilegedStateBuffer(
             output_dir=args.privileged_buffer_dir,
@@ -155,7 +155,7 @@ def main():
         env_type = "maniskill"
         # remove the Maniskill- prefix
         env_name = args.env_name[len("Maniskill-"):]
-        envs = ManiskillEnv(env_name, args.num_envs, args.seed)
+        envs = ManiskillEnv(env_name, args.num_envs, args.seed, privileged_buffer=privileged_buffer)
         eval_envs = envs
         render_env = ManiskillEnv(env_name, 1, args.seed)
     else:
@@ -198,6 +198,7 @@ def main():
         n_critic_obs=n_critic_obs,
         asymmetric_obs=envs.asymmetric_obs and args.enable_asymmetric_obs,
         playground_mode=env_type == "mujoco_playground",
+        maniskill_mode=env_type == "maniskill",
         n_steps=args.num_steps,
         gamma=args.gamma,
         device=device,
@@ -361,6 +362,8 @@ def main():
             obs = eval_envs.reset(random_start_init=False)
         else:
             obs = eval_envs.reset()
+            if type(obs) == tuple:
+                obs = obs[0]
 
         # Run for a fixed number of steps
         for i in range(eval_envs.max_episode_steps):
@@ -402,7 +405,7 @@ def main():
                 "We don't support rendering for IsaacLab and MTBench environments"
             )
         elif env_type == "maniskill":
-            obs = render_env.reset()
+            obs, _ = render_env.reset()
             renders =[render_env.env.render_rgb_array().cpu().squeeze(0)]
         else:
             obs = render_env.reset()
@@ -586,6 +589,8 @@ def main():
         critic_obs = torch.as_tensor(critic_obs, device=device, dtype=torch.float)
     else:
         obs = envs.reset()
+        if type(obs) == tuple:
+            obs = obs[0]
     if args.checkpoint_path:
         # Load checkpoint if specified
         torch_checkpoint = torch.load(
@@ -618,7 +623,6 @@ def main():
         ):
             start_time = time.time()
             measure_burnin = global_step
-
         with torch.no_grad(), autocast(
             device_type=amp_device_type, dtype=amp_dtype, enabled=amp_enabled
         ):
@@ -659,7 +663,6 @@ def main():
                     "truncations": truncations.long(),
                     "dones": dones.long(),
                 },
-                # "full_state": envs.save_state() # too expensive to save
             },
             batch_size=(envs.num_envs,),
             device=device,
@@ -669,6 +672,8 @@ def main():
             transition["critic_observations"] = critic_obs
             transition["next"]["critic_observations"] = true_next_critic_obs
             transition["privileged_state"] = privileged_state
+        if env_type == "maniskill":
+            transition['privileged_state'] = envs.env.get_state()
         rb.extend(transition)
 
         obs = next_obs
@@ -760,7 +765,7 @@ def main():
                             np.array(renders).transpose(
                                 0, 3, 1, 2
                             ),  # Convert to (T, C, H, W) format
-                            fps=30,
+                            fps=10,
                             format="gif",
                         )
                         logs["render_video"] = render_video
@@ -801,7 +806,7 @@ def main():
                 
                 # Create a copy of the buffer data on CPU - observations and rewards
                 buffer_snapshot = {
-                    'privileged_state': rb.privileged_state.cpu(),
+                    'privileged_state': rb.privileged_state.cpu() if hasattr(rb, 'privileged_state') else None,
                     'rewards': rb.rewards.cpu(),
                     # 'full_state': rb.full_state.cpu(),
                     '_metadata': {
@@ -811,6 +816,11 @@ def main():
                         'global_step': global_step,
                     }
                 }
+                
+                # Add state_dict data for ManiSkill environments
+                # if env_type == "maniskill" and hasattr(rb, 'state_dict_tensors') and rb.state_dict_tensors is not None:
+                #     buffer_snapshot['state_dict_tensors'] = rb.state_dict_tensors.cpu()
+                #     buffer_snapshot['state_dict_metadata'] = rb.state_dict_metadata
                 
                 # Save to pickle file
                 snapshot_path = f"{args.output_dir}/{run_name}_buffer_snapshot_{global_step}.pkl"

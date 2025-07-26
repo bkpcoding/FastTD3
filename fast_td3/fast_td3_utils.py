@@ -22,6 +22,7 @@ class SimpleReplayBuffer(nn.Module):
         n_critic_obs: int,
         asymmetric_obs: bool = False,
         playground_mode: bool = False,
+        maniskill_mode: bool = False,
         n_steps: int = 1,
         gamma: float = 0.99,
         device=None,
@@ -48,7 +49,8 @@ class SimpleReplayBuffer(nn.Module):
         self.gamma = gamma
         self.n_steps = n_steps
         self.device = device
-
+        self.privileged_state = None
+        self.maniskill_mode = maniskill_mode
         self.observations = torch.zeros(
             (n_env, buffer_size, n_obs), device=device, dtype=torch.float
         )
@@ -91,6 +93,11 @@ class SimpleReplayBuffer(nn.Module):
                     (n_env, buffer_size, n_critic_obs), device=device, dtype=torch.float
                 )
         self.ptr = 0
+        
+        # For ManiSkill environments, store state_dict as tensors
+        # if maniskill_mode:
+            # self.state_dict_tensors = None  # Will be initialized when first state_dict is received
+            # self.state_dict_metadata = None  # Metadata for reconstructing state_dict
 
     @torch.no_grad()
     def extend(
@@ -128,6 +135,30 @@ class SimpleReplayBuffer(nn.Module):
                 # Store full critic observations
                 self.critic_observations[:, ptr] = critic_observations
                 self.next_critic_observations[:, ptr] = next_critic_observations
+        
+        # Store state_dict for ManiSkill environments
+        if self.maniskill_mode:
+            # state_tensor, metadata = state_dict_to_tensor(state_dict)
+            # if state_tensor is not None:
+            #     # Initialize buffer on first use
+            #     if self.state_dict_tensors is None:
+            #         self.state_dict_tensors = torch.zeros(
+            #             (self.n_env, self.buffer_size, state_tensor.shape[-1]),
+            #             device=self.device, dtype=torch.float
+            #         )
+            #         self.state_dict_metadata = metadata
+                
+            #     self.state_dict_tensors[:, ptr] = state_tensor
+            try:
+                privileged_state = tensor_dict["privileged_state"]
+                if self.privileged_state is None:
+                    self.privileged_state = torch.zeros(
+                        (self.n_env, self.buffer_size, privileged_state.shape[-1]),
+                        device=self.device, dtype=torch.float
+                    )
+                self.privileged_state[:, ptr] = privileged_state
+            except:
+                pass
         self.ptr += 1
 
     @torch.no_grad()
@@ -756,6 +787,98 @@ class PerTaskRewardNormalizer(nn.Module):
         return self._scale_reward(rewards, task_ids)
 
 
+def state_dict_to_tensor(state_dict):
+    """
+    Convert state_dict to a single tensor by concatenating along the last dimension.
+    
+    Args:
+        state_dict: Nested dictionary with tensors (e.g., {'actors': {'cube': [2048, 13], ...}, 'articulations': {...}})
+    
+    Returns:
+        tuple: (concatenated_tensor [num_env, total_features], metadata_dict)
+    """
+    if state_dict is None:
+        return None, None
+    
+    tensors = []
+    metadata = {'order': [], 'shapes': {}}
+    
+    def collect_tensors(d, path=""):
+        # Handle TensorDict objects
+        if hasattr(d, 'items'):
+            items = d.items()
+        else:
+            # Fallback for regular dict
+            items = d.items() if isinstance(d, dict) else []
+            
+        for key, value in sorted(items):  # Sort for consistent ordering
+            current_path = f"{path}.{key}" if path else key
+            
+            # Check if it's a nested structure (dict, TensorDict)
+            if isinstance(value, dict) or hasattr(value, 'items'):
+                collect_tensors(value, current_path)
+            elif isinstance(value, torch.Tensor):
+                metadata['order'].append(current_path)
+                metadata['shapes'][current_path] = value.shape[-1]  # Store last dim size
+                tensors.append(value)
+    
+    collect_tensors(state_dict)
+    
+    if not tensors:
+        return None, None
+    # Concatenate along last dimension
+    concatenated = torch.cat(tensors, dim=-1)  # [num_env, total_features]
+    return concatenated, metadata
+
+
+def tensor_to_state_dict(tensor, metadata):
+    """
+    Reconstruct state_dict from concatenated tensor and metadata.
+    
+    Args:
+        tensor: Concatenated tensor [num_env, total_features]
+        metadata: Metadata dict from state_dict_to_tensor
+    
+    Returns:
+        TensorDict: Reconstructed state_dict with original structure
+    """
+    if tensor is None or metadata is None:
+        return None
+    
+    state_dict = {}
+    start_idx = 0
+    
+    for path in metadata['order']:
+        feature_size = metadata['shapes'][path]
+        
+        # Extract tensor slice
+        tensor_slice = tensor[:, start_idx:start_idx + feature_size]
+        
+        # Navigate to the correct position in nested dict
+        keys = path.split('.')
+        current_dict = state_dict
+        
+        for key in keys[:-1]:
+            if key not in current_dict:
+                current_dict[key] = {}
+            current_dict = current_dict[key]
+        
+        current_dict[keys[-1]] = tensor_slice
+        start_idx += feature_size
+    
+    # Convert nested dict to TensorDict
+    def dict_to_tensordict(d):
+        tensordict_data = {}
+        for key, value in d.items():
+            if isinstance(value, dict):
+                tensordict_data[key] = dict_to_tensordict(value)
+            else:
+                tensordict_data[key] = value
+        return TensorDict(tensordict_data, batch_size=tensor.shape[0])
+    
+    return dict_to_tensordict(state_dict)
+
+
 def cpu_state(sd):
     # detach & move to host without locking the compute stream
     return {k: v.detach().to("cpu", non_blocking=True) for k, v in sd.items()}
@@ -851,14 +974,13 @@ class PrivilegedStateBuffer:
         # Load buffer snapshots
         snapshots = self._load_buffer_snapshots(output_dir, run_name, max_files)
         
-        # Process and concatenate all privileged states and rewards
+        # Check if we have ManiSkill state_dict data
         self.privileged_states, self.rewards, self.priorities = self._process_snapshots(snapshots)
         self.total_states = len(self.privileged_states)
         
         print(f"Loaded {self.total_states} privileged states from {len(snapshots)} files")
         print(f"Privileged state shape: {self.privileged_states.shape}")
         print(f"Privileged state range: [{self.privileged_states.min():.3f}, {self.privileged_states.max():.3f}]")
-        print(f"Reward range: [{self.rewards.min():.3f}, {self.rewards.max():.3f}]")
         
         # Check for extreme values that might cause issues
         if torch.any(torch.abs(self.privileged_states) > 1000):
@@ -866,6 +988,8 @@ class PrivilegedStateBuffer:
             extreme_mask = torch.abs(self.privileged_states) > 1000
             print(f"Number of extreme values: {extreme_mask.sum().item()}")
             print(f"Max absolute value: {torch.abs(self.privileged_states).max().item():.1f}")
+        
+        print(f"Reward range: [{self.rewards.min():.3f}, {self.rewards.max():.3f}]")
         
     def _load_buffer_snapshots(self, output_dir: str, run_name: str = None, max_files: int = None):
         """Load all buffer snapshots from the output directory."""
@@ -905,7 +1029,9 @@ class PrivilegedStateBuffer:
                     'rewards': data.get('rewards', None),  # Handle backward compatibility
                     'metadata': data['_metadata'],
                     'file_path': file_path,
-                    'is_single_agent': is_single_agent
+                    'is_single_agent': is_single_agent,
+                    # 'state_dict_tensors': data.get('state_dict_tensors', None),
+                    # 'state_dict_metadata': data.get('state_dict_metadata', None)
                 })
         
         # Sort by global step
@@ -926,7 +1052,6 @@ class PrivilegedStateBuffer:
             if rewards is None:
                 print(f"Warning: No rewards found in {snapshot['file_path']}, skipping")
                 continue
-                
             # Convert to torch tensors
             if isinstance(privileged_state, dict) and 'privileged_state' in privileged_state:
                 # Handle dict format with privileged states
@@ -958,11 +1083,21 @@ class PrivilegedStateBuffer:
         
         # Sort by reward and keep only top samples if specified
         if self.max_samples is not None and len(privileged_states) > self.max_samples:
-            # Sort by reward (descending) and keep top samples
-            sorted_indices = torch.argsort(rewards, descending=True)[:self.max_samples]
-            privileged_states = privileged_states[sorted_indices]
-            rewards = rewards[sorted_indices]
-            print(f"Kept top {self.max_samples} samples by reward (range: [{rewards.min():.3f}, {rewards.max():.3f}])")
+            # ************* JUST FOR EXPERIMENTATION *************
+            random_sample = False
+            if random_sample:
+                print(f"********** WARNING: Randomly sampling {self.max_samples} samples from buffer **********")
+                # pick random samples from the buffer of max_samples
+                indices = torch.randint(0, len(privileged_states), (self.max_samples,))
+                privileged_states = privileged_states[indices]
+                rewards = rewards[indices]
+            else:
+                # Sort by reward (descending) and keep top samples
+                sorted_indices = torch.argsort(rewards, descending=True)[:self.max_samples]
+                #
+                privileged_states = privileged_states[sorted_indices]
+                rewards = rewards[sorted_indices]
+                print(f"Kept top {self.max_samples} samples by reward (range: [{rewards.min():.3f}, {rewards.max():.3f}])")
         
         # Move to device
         privileged_states = privileged_states.to(self.device)
@@ -973,15 +1108,71 @@ class PrivilegedStateBuffer:
         
         return privileged_states, rewards, priorities
     
+    def _process_maniskill_snapshots(self, snapshots):
+        """Process snapshots to extract ManiSkill state_dict tensors and rewards."""
+        all_state_dict_tensors = []
+        all_rewards = []
+        self.state_dict_metadata = None
+        
+        for snapshot in snapshots:
+            state_dict_tensors = snapshot['state_dict_tensors']
+            state_dict_meta = snapshot['state_dict_metadata']
+            rewards = snapshot['rewards']
+            if state_dict_tensors is None or rewards is None:
+                print(f"Warning: No state_dict data or rewards found in {snapshot['file_path']}, skipping")
+                continue
+            
+            # Store metadata from first valid snapshot
+            if self.state_dict_metadata is None:
+                self.state_dict_metadata = state_dict_meta
+                
+            # Convert to torch tensors
+            state_tensors = torch.tensor(state_dict_tensors, dtype=torch.float32)
+            reward_tensor = torch.tensor(rewards, dtype=torch.float32)
+            
+            # Flatten if needed (remove env dimension if present)
+            if len(state_tensors.shape) == 3:  # [n_env, buffer_size, feature_size]
+                state_tensors = state_tensors.view(-1, state_tensors.shape[-1])
+                reward_tensor = reward_tensor.view(-1)
+                
+            if len(state_tensors) > 0:  # Only add if we have valid states
+                all_state_dict_tensors.append(state_tensors)
+                all_rewards.append(reward_tensor)
+        
+        if not all_state_dict_tensors:
+            raise ValueError("No valid state_dict tensors found in any snapshot files")
+        
+        # Concatenate all data
+        state_dict_tensors = torch.cat(all_state_dict_tensors, dim=0)
+        rewards = torch.cat(all_rewards, dim=0)
+        
+        # Sort by reward and keep only top samples if specified
+        if self.max_samples is not None and len(state_dict_tensors) > self.max_samples:
+            # Sort by reward (descending) and keep top samples
+            sorted_indices = torch.argsort(rewards, descending=True)[:self.max_samples]
+            state_dict_tensors = state_dict_tensors[sorted_indices]
+            rewards = rewards[sorted_indices]
+            print(f"Kept top {self.max_samples} samples by reward (range: [{rewards.min():.3f}, {rewards.max():.3f}])")
+        
+        # Move to device
+        state_dict_tensors = state_dict_tensors.to(self.device)
+        rewards = rewards.to(self.device)
+        
+        # Compute priorities based on reward magnitude
+        priorities = torch.abs(rewards) + 1e-6  # Small epsilon to avoid zero priorities
+        
+        return state_dict_tensors, rewards, priorities, self.state_dict_metadata
+    
     def sample(self, batch_size: int, use_prioritized: bool = True) -> torch.Tensor:
-        """Sample privileged states from the buffer.
+        """Sample privileged states or state_dict tensors from the buffer.
         
         Args:
             batch_size: Number of states to sample
             use_prioritized: Whether to use reward-based prioritized sampling
             
         Returns:
-            Tensor of privileged states [batch_size, privileged_obs_size]
+            Tensor of privileged states [batch_size, privileged_obs_size] or 
+            state_dict tensors [batch_size, state_dict_feature_size]
         """
         if batch_size > self.total_states:
             # If we don't have enough states, sample with replacement

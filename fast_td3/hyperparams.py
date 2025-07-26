@@ -28,7 +28,7 @@ class BaseArgs:
     """whether to use wandb"""
     checkpoint_path: str = None
     """the path to the checkpoint file"""
-    output_dir: str = "./output"
+    output_dir: str = "./output_maniskill_unitree"
     """the path to the output directory"""
     num_envs: int = 1024  # 48 on 6 core cpu (for humanoid bench, mjx doesn't require cpu)
     """the number of environments to run in parallel"""
@@ -44,7 +44,7 @@ class BaseArgs:
     """the learning rate of the critic at the end of training"""
     actor_learning_rate_end: float = 3e-4
     """the learning rate for the actor at the end of training"""
-    buffer_size: int = 1024 * 50
+    buffer_size: int = 1024 * 10
     """the replay memory buffer size"""
     num_steps: int = 1
     """the number of steps to use for the multi-step return"""
@@ -136,7 +136,7 @@ class BaseArgs:
     # Privileged state buffer parameters
     use_privileged_buffer: bool = False
     """whether to use privileged state buffer"""
-    privileged_buffer_dir: str = 'output_test_single'
+    privileged_buffer_dir: str = 'output_maniskill_unitree'
     """directory containing privileged state buffer snapshots (None to disable)"""
     privileged_buffer_run_name: str = None
     """run name filter for privileged buffer files (None for all files)"""
